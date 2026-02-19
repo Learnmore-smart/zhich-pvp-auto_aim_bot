@@ -1,34 +1,62 @@
 /**
- * API PVP — Keyboard + Aim Pad Control Client
+ * API PVP — Complete Arena Client
  * ═══════════════════════════════════════════════════════════════════════════
- * Pure vanilla JS. No framework, no build step. Zero dependencies.
- *
- * Features
- * ────────
- * 1. WASD / arrow keys for movement
- * 2. Space fires a bullet at the current aim-pad angle (free angle, 0-359°)
- * 3. Arrow keys fire cardinal-direction shots (up/down/left/right)
- * 4. Aim pad: mouse move/drag over the circular pad → sets aimAngle
- *    Clicking the pad fires immediately
- * 5. Shift=shield, R=reload, F=dash
- * 6. Smart local gates: blocked actions logged without network round-trip
- * 7. State polling every 200ms for live HUD updates
- * 8. Action retry queue for rate-limit / cooldown errors
+ * Features:
+ *  1. Canvas-based arena rendering (player-centered viewport, 60fps)
+ *  2. Smooth interpolation for player positions, bullet extrapolation
+ *  3. WebSocket-first with HTTP polling fallback
+ *  4. WASD continuous movement, Space shoot at aim angle, Arrow cardinal shoot
+ *  5. Aim pad for free-angle targeting
+ *  6. HUD overlay: HP, Ammo, Kills, Mode, Indicators
+ *  7. Minimap of full arena
+ *  8. Action log with timestamps
  */
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// CONFIG
+// ══════════════════════════════════════════════════════════════════════════════
+
 const DEFAULT_SERVER = "https://api-pvp-production.up.railway.app";
 const POLL_INTERVAL_MS = 200;
 const ACTION_RETRY_MS = 80;
-const MAX_LOG_ENTRIES = 120;
-
+const MAX_LOG_ENTRIES = 40;
 const MAX_AMMO = 5;
-const MOVEMENT_TICK_MS = 50; // Match server tick rate (50 ms) for continuous movement
+const MOVEMENT_TICK_MS = 50;
+const CELL = 26; // px per arena unit
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// Canvas colours
+const PALETTE = {
+  bg: "#0c0e1a",
+  grid: "rgba(100, 120, 200, 0.06)",
+  arenaBorder: "#00d4ff",
+  wallFill: "#2a3060",
+  wallStroke: "#3a4080",
+  crateFill: "#5a4530",
+  crateStroke: "#7a6540",
+  bulletFill: "#ff8c00",
+  bulletGlow: "rgba(255, 140, 0, 0.5)",
+  bulletTrail: "rgba(255, 140, 0, 0.3)",
+  deadStroke: "#444",
+  playerBorder: "rgba(255,255,255,0.15)",
+  playerName: "#e8ecf8",
+  hpBarBg: "rgba(255,255,255,0.08)",
+  selfGlow: "rgba(0, 212, 255, 0.2)",
+  mapBg: "rgba(10, 12, 20, 0.9)",
+  mapGrid: "rgba(100, 120, 200, 0.1)",
+  mapBorder: "rgba(0, 212, 255, 0.4)",
+  mapSelf: "#00d4ff",
+  mapOther: "#ff2d78",
+  mapBullet: "#ff8c00",
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════════════════════════
+
 let serverUrl = DEFAULT_SERVER;
 let playerId = null;
 let playerName = "";
+let playerColor = "#00d4ff";
 
 let localState = {
   hp: 100,
@@ -36,134 +64,140 @@ let localState = {
   kills: 0,
   alive: true,
   reloadCd: false,
-  mode: "test",
+  mode: "sandbox",
 };
 
-// Aim pad state — degrees, 0=right, 90=down (standard canvas coords)
+let gameState = null; // Full state from server/WS
+
+// Aim
 let aimAngle = 0;
 let aimDragging = false;
 
-let lastMoveDir = "up";
-let pollTimer = null;
-let pendingRetry = null;
+// Movement
+let heldMovementKeys = new Set();
+let lastMovementKey = null;
 let movementTimer = null;
-let heldMovementKeys = new Set(); // Track which movement keys are held
-let lastMovementKey = null; // Track most recent movement key pressed
 
-// ── DOM refs ──────────────────────────────────────────────────────────────────
-const setupScreen = document.getElementById("setup-screen");
-const gameScreen = document.getElementById("game-screen");
-const serverInput = document.getElementById("server-url");
-const usernameInput = document.getElementById("username");
-const registerBtn = document.getElementById("register-btn");
-const setupError = document.getElementById("setup-error");
+// Polling & WS
+let pollTimer = null;
+let ws = null;
+let pendingRetry = null;
 
-const displayName = document.getElementById("display-name");
-const playerIdEl = document.getElementById("player-id-display");
-const modeBadge = document.getElementById("mode-badge");
+// Rendering interpolation
+let renderSelf = null;
+let renderNearby = {};
+let lastRafTime = 0;
+let lastTickTime = 0;
 
-const barHp = document.getElementById("bar-hp");
-const ammoPips = document.getElementById("ammo-pips");
-const valHp = document.getElementById("val-hp");
-const valAmmo = document.getElementById("val-ammo");
-const valKills = document.getElementById("val-kills");
+// ══════════════════════════════════════════════════════════════════════════════
+// DOM REFS
+// ══════════════════════════════════════════════════════════════════════════════
 
-const indReload = document.getElementById("ind-reload");
-const indDead = document.getElementById("ind-dead");
-const lastActionEl = document.getElementById("last-action");
-const actionLog = document.getElementById("action-log");
+const $ = (id) => document.getElementById(id);
 
-const linkBigscreen = document.getElementById("link-bigscreen");
-const linkMonitor = document.getElementById("link-monitor");
-const linkApi = document.getElementById("link-api");
+const setupScreen = $("setup-screen");
+const gameScreen = $("game-screen");
+const serverInput = $("server-url");
+const usernameInput = $("username");
+const registerBtn = $("register-btn");
+const setupError = $("setup-error");
 
-const aimPad = document.getElementById("aim-pad");
-const aimDot = document.getElementById("aim-dot");
-const aimLine = document.getElementById("aim-line");
-const aimAngleEl = document.getElementById("aim-angle-display");
+const displayName = $("display-name");
+const playerIdEl = $("player-id-display");
+const playerColorDot = $("player-color-dot");
+const modeBadge = $("mode-badge");
+const wsBadge = $("ws-status");
+
+const barHp = $("bar-hp");
+const ammoPipsEl = $("ammo-pips");
+const valHp = $("val-hp");
+const valAmmo = $("val-ammo");
+const valKills = $("val-kills");
+const indReload = $("ind-reload");
+const indDead = $("ind-dead");
+const lastActionEl = $("last-action-toast");
+const actionLog = $("action-log");
+
+const aimPad = $("aim-pad");
+const aimDot = $("aim-dot");
+const aimLineEl = $("aim-line");
+const aimAngleEl = $("aim-angle-display");
+
+const arenaCanvas = $("arena-canvas");
+const arenaCtx = arenaCanvas.getContext("2d");
+const minimapCanvas = $("minimap-canvas");
+const minimapCtx = minimapCanvas.getContext("2d");
+
+const gameOverlay = $("game-overlay");
+const overlayIcon = $("overlay-icon");
+const overlayTitle = $("overlay-title");
+const overlaySub = $("overlay-sub");
 
 // Key boxes
 const KEY_BOXES = {
-  w: document.getElementById("k-w"),
-  a: document.getElementById("k-a"),
-  s: document.getElementById("k-s"),
-  d: document.getElementById("k-d"),
-  up: document.getElementById("k-up"),
-  left: document.getElementById("k-left"),
-  down: document.getElementById("k-down"),
-  right: document.getElementById("k-right"),
-  space: document.getElementById("k-space"),
-  r: document.getElementById("k-r"),
+  w: $("k-w"),
+  a: $("k-a"),
+  s: $("k-s"),
+  d: $("k-d"),
+  space: $("k-space"),
+  r: $("k-r"),
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
 // AIM PAD
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * setAimAngle(deg)
- * Updates the aim angle and re-positions the indicator dot/line.
- */
 function setAimAngle(deg) {
   aimAngle = ((deg % 360) + 360) % 360;
   const rad = (aimAngle * Math.PI) / 180;
-  const r = 28; // radius of dot travel from center (px)
-  const cx = 40; // pad center x
-  const cy = 40; // pad center y
+  const r = 28,
+    cx = 40,
+    cy = 40;
   const dotX = cx + r * Math.cos(rad);
   const dotY = cy + r * Math.sin(rad);
   aimDot.style.left = dotX + "px";
   aimDot.style.top = dotY + "px";
   aimDot.style.transform = "translate(-50%,-50%)";
-  // Rotate the line
-  aimLine.style.transform = "rotate(" + aimAngle + "deg)";
+  aimLineEl.style.transform = "rotate(" + aimAngle + "deg)";
   aimAngleEl.textContent = Math.round(aimAngle) + "\u00b0";
 }
 
-/**
- * padEventToAngle(e)
- * Converts a mouse/touch event on the aim pad to an angle in degrees.
- */
 function padEventToAngle(e) {
   const rect = aimPad.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
-  const dx = (e.clientX || (e.touches && e.touches[0].clientX)) - cx;
-  const dy = (e.clientY || (e.touches && e.touches[0].clientY)) - cy;
-  return (Math.atan2(dy, dx) * 180) / Math.PI; // -180..180
+  const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+  const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+  return (Math.atan2(clientY - cy, clientX - cx) * 180) / Math.PI;
 }
 
-aimPad.addEventListener("mousedown", function (e) {
+aimPad.addEventListener("mousedown", (e) => {
   e.preventDefault();
   aimDragging = true;
   setAimAngle(padEventToAngle(e));
   aimPad.classList.add("shooting");
 });
 
-aimPad.addEventListener("click", function (e) {
+aimPad.addEventListener("click", (e) => {
   setAimAngle(padEventToAngle(e));
-  // Fire immediately on click
   sendAction("shoot", null, aimAngle);
   aimPad.classList.add("shooting");
-  setTimeout(function () {
-    aimPad.classList.remove("shooting");
-  }, 150);
+  setTimeout(() => aimPad.classList.remove("shooting"), 150);
 });
 
-window.addEventListener("mousemove", function (e) {
-  if (!aimDragging) return;
-  setAimAngle(padEventToAngle(e));
+window.addEventListener("mousemove", (e) => {
+  if (aimDragging) setAimAngle(padEventToAngle(e));
 });
 
-window.addEventListener("mouseup", function () {
+window.addEventListener("mouseup", () => {
   aimDragging = false;
   aimPad.classList.remove("shooting");
 });
 
-// Touch support
+// Touch
 aimPad.addEventListener(
   "touchstart",
-  function (e) {
+  (e) => {
     e.preventDefault();
     aimDragging = true;
     setAimAngle(padEventToAngle(e));
@@ -173,35 +207,29 @@ aimPad.addEventListener(
 
 aimPad.addEventListener(
   "touchmove",
-  function (e) {
+  (e) => {
     e.preventDefault();
     setAimAngle(padEventToAngle(e));
   },
   { passive: false },
 );
 
-aimPad.addEventListener("touchend", function () {
+aimPad.addEventListener("touchend", () => {
   aimDragging = false;
   sendAction("shoot", null, aimAngle);
 });
 
-// Initialise dot position
 setAimAngle(0);
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SETUP
+// REGISTRATION
 // ══════════════════════════════════════════════════════════════════════════════
 
 registerBtn.addEventListener("click", doRegister);
-document
-  .getElementById("disconnect-btn")
-  .addEventListener("click", doDisconnect);
-document.getElementById("clear-log").addEventListener("click", function () {
-  actionLog.innerHTML = "";
-});
+$("disconnect-btn").addEventListener("click", doDisconnect);
 
-[serverInput, usernameInput].forEach(function (el) {
-  el.addEventListener("keydown", function (e) {
+[serverInput, usernameInput].forEach((el) => {
+  el.addEventListener("keydown", (e) => {
     if (e.key === "Enter") doRegister();
   });
 });
@@ -215,8 +243,9 @@ async function doRegister() {
   }
   serverUrl = url;
   registerBtn.disabled = true;
-  registerBtn.textContent = "Registering\u2026";
+  registerBtn.querySelector(".btn-text").textContent = "Connecting\u2026";
   hideSetupError();
+
   try {
     const res = await apiFetch("/register", "POST", { username: name });
     const data = await res.json();
@@ -226,49 +255,111 @@ async function doRegister() {
     }
     playerId = data.player_id;
     playerName = data.username;
+    playerColor = "#00d4ff"; // will be updated from state
     enterGame();
   } catch (e) {
     showSetupError("Cannot reach server: " + (e.message || "network error"));
   } finally {
     registerBtn.disabled = false;
-    registerBtn.textContent = "Register & Connect";
+    registerBtn.querySelector(".btn-text").textContent = "Deploy & Connect";
   }
 }
 
 function enterGame() {
-  linkBigscreen.href = serverUrl + "/bigscreen";
-  linkMonitor.href =
-    serverUrl + "/monitor?player_id=" + encodeURIComponent(playerId);
-  linkApi.href = serverUrl + "/players";
-
   displayName.textContent = playerName;
   playerIdEl.textContent = playerId;
 
   setupScreen.classList.remove("active");
   gameScreen.classList.add("active");
 
+  resizeArenaCanvas();
+  resizeMinimapCanvas();
+  connectWebSocket();
   startPoller();
+
   addLog("Registered as " + playerName + " (" + playerId + ")", "ok");
   addLog("Server: " + serverUrl, "info");
-  addLog(
-    "WASD=move  Space=shoot(aim)  Arrows=shoot cardinal  R=reload",
-    "info",
-  );
+  addLog("WASD=move  Space=shoot  Arrows=shoot  R=reload", "info");
 }
 
 function doDisconnect() {
   stopPoller();
   stopContinuousMovement();
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
   heldMovementKeys.clear();
   lastMovementKey = null;
   playerId = null;
   playerName = "";
+  gameState = null;
+  renderSelf = null;
+  renderNearby = {};
+  gameOverlay.classList.add("hidden");
   gameScreen.classList.remove("active");
   setupScreen.classList.add("active");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// STATE POLLER
+// WEBSOCKET
+// ══════════════════════════════════════════════════════════════════════════════
+
+function connectWebSocket() {
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  try {
+    const serverOrigin = new URL(serverUrl);
+    const wsProto = serverOrigin.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl =
+      wsProto +
+      "//" +
+      serverOrigin.host +
+      "?type=player&player_id=" +
+      encodeURIComponent(playerId);
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setWsStatus(true);
+      addLog("WebSocket connected", "ok");
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "state") {
+          onStateUpdate(msg.data);
+        }
+      } catch (_) {}
+    };
+
+    ws.onclose = () => {
+      setWsStatus(false);
+      if (playerId) {
+        addLog("WebSocket disconnected — reconnecting…", "warn");
+        setTimeout(connectWebSocket, 1500);
+      }
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+  } catch (e) {
+    addLog("WebSocket error: " + e.message, "err");
+  }
+}
+
+function setWsStatus(connected) {
+  wsBadge.className = "ws-badge " + (connected ? "connected" : "disconnected");
+  wsBadge.querySelector(".ws-label").textContent = connected
+    ? "Live"
+    : "Connecting";
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE POLLER (fallback)
 // ══════════════════════════════════════════════════════════════════════════════
 
 function startPoller() {
@@ -286,6 +377,8 @@ function stopPoller() {
 
 async function pollState() {
   if (!playerId) return;
+  // Skip polling if WS is active and delivering data
+  if (ws && ws.readyState === WebSocket.OPEN && gameState) return;
   try {
     const res = await apiFetch(
       "/state?player_id=" + encodeURIComponent(playerId),
@@ -293,75 +386,464 @@ async function pollState() {
     );
     if (!res.ok) return;
     const data = await res.json();
-    applyState(data);
+    onStateUpdate(data);
   } catch (_) {}
 }
 
-function applyState(data) {
-  if (!data.self) return;
-  const s = data.self;
-  localState.hp = s.hp != null ? s.hp : localState.hp;
-  localState.ammo = s.ammo != null ? s.ammo : localState.ammo;
-  localState.kills = s.kills != null ? s.kills : localState.kills;
-  localState.alive = s.alive != null ? s.alive : localState.alive;
-  localState.reloadCd = s.reloadCooldown > 0;
-  localState.mode = data.mode || localState.mode;
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE UPDATE HANDLER
+// ══════════════════════════════════════════════════════════════════════════════
+
+function onStateUpdate(data) {
+  if (!data) return;
+
+  // Initialise render positions
+  if (data.self) {
+    if (!renderSelf) renderSelf = { x: data.self.x, y: data.self.y };
+    // Update player colour
+    if (data.self.color) {
+      playerColor = data.self.color;
+      playerColorDot.style.background = playerColor;
+      playerColorDot.style.boxShadow = "0 0 8px " + playerColor;
+    }
+  }
+
+  (data.nearbyPlayers || []).forEach((p) => {
+    if (!renderNearby[p.id]) renderNearby[p.id] = { x: p.x, y: p.y };
+  });
+
+  gameState = data;
+  lastTickTime = performance.now();
+
+  // Update local HUD state
+  if (data.self) {
+    const s = data.self;
+    localState.hp = s.hp != null ? s.hp : localState.hp;
+    localState.ammo = s.ammo != null ? s.ammo : localState.ammo;
+    localState.kills = s.kills != null ? s.kills : localState.kills;
+    localState.alive = s.alive != null ? s.alive : localState.alive;
+    localState.reloadCd = s.reloadCooldown > 0;
+    localState.mode = data.mode || localState.mode;
+  }
+
   updateHUD();
+  updateGameOverlay();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// HUD
+// HUD UPDATE
 // ══════════════════════════════════════════════════════════════════════════════
 
 function updateHUD() {
   const { hp, ammo, kills, alive, reloadCd, mode } = localState;
 
+  // HP bar
   const hpPct = Math.max(0, Math.min(100, hp));
   barHp.style.width = hpPct + "%";
-  barHp.style.background =
-    hpPct > 50 ? "#2ecc71" : hpPct > 25 ? "#f1c40f" : "#e74c3c";
+  if (hpPct > 50) barHp.style.background = "#00e676";
+  else if (hpPct > 25) barHp.style.background = "#ffd426";
+  else barHp.style.background = "#ff3b3b";
   valHp.textContent = hp;
 
-  if (ammoPips.children.length !== MAX_AMMO) {
-    ammoPips.innerHTML = "";
-    for (var i = 0; i < MAX_AMMO; i++) {
-      var pip = document.createElement("div");
+  // Ammo pips
+  if (ammoPipsEl.children.length !== MAX_AMMO) {
+    ammoPipsEl.innerHTML = "";
+    for (let i = 0; i < MAX_AMMO; i++) {
+      const pip = document.createElement("div");
       pip.className = "pip";
-      ammoPips.appendChild(pip);
+      ammoPipsEl.appendChild(pip);
     }
   }
-  Array.from(ammoPips.children).forEach(function (pip, i) {
+  Array.from(ammoPipsEl.children).forEach((pip, i) => {
     pip.className = "pip" + (i < ammo ? "" : " empty");
   });
   valAmmo.textContent = ammo + "/" + MAX_AMMO;
+
+  // Kills
   valKills.textContent = kills;
 
+  // Mode badge
   const modeMap = {
-    test: ["SANDBOX", "badge-sandbox"],
-    sandbox: ["SANDBOX", "badge-sandbox"],
-    lobby: ["LOBBY", "badge-lobby"],
-    battle: ["BATTLE", "badge-battle"],
-    finished: ["FINISHED", "badge-finished"],
+    test: ["SANDBOX", "mode-sandbox"],
+    sandbox: ["SANDBOX", "mode-sandbox"],
+    lobby: ["LOBBY", "mode-lobby"],
+    battle: ["BATTLE", "mode-battle"],
+    finished: ["FINISHED", "mode-finished"],
   };
-  const mEntry = modeMap[mode] || ["—", "badge-sandbox"];
-  modeBadge.textContent = mEntry[0];
-  modeBadge.className = "badge " + mEntry[1];
+  const [mLabel, mClass] = modeMap[mode] || ["—", "mode-sandbox"];
+  modeBadge.textContent = mLabel;
+  modeBadge.className = "mode-badge " + mClass;
 
+  // Indicators
   indReload.classList.toggle("active", !!reloadCd);
   indDead.classList.toggle("hidden", !!alive);
   if (!alive) indDead.classList.add("dead");
+  else indDead.classList.remove("dead");
+}
+
+function updateGameOverlay() {
+  if (!gameState || !gameState.self) return;
+  const s = gameState.self;
+  const finished = gameState.mode === "finished";
+  const winner = gameState.winner;
+
+  if (!s.alive) {
+    const winnerName = winner ? winner.username : null;
+    gameOverlay.className = "game-overlay dead";
+    overlayIcon.textContent = "💀";
+    overlayTitle.textContent = "YOU DIED";
+    overlaySub.textContent = winnerName
+      ? winnerName + " wins!"
+      : "Waiting for game to end…";
+  } else if (finished && winner) {
+    if (winner.id === playerId) {
+      gameOverlay.className = "game-overlay won";
+      overlayIcon.textContent = "🏆";
+      overlayTitle.textContent = "YOU WIN!";
+      overlaySub.textContent =
+        "HP: " + winner.hp + "  ·  Kills: " + winner.kills;
+    } else {
+      gameOverlay.className = "game-overlay fin";
+      overlayIcon.textContent = "🎮";
+      overlayTitle.textContent = "GAME OVER";
+      overlaySub.textContent = winner.username + " wins!";
+    }
+  } else {
+    gameOverlay.classList.add("hidden");
+    return;
+  }
+  gameOverlay.classList.remove("hidden");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CANVAS SETUP
+// ══════════════════════════════════════════════════════════════════════════════
+
+function resizeArenaCanvas() {
+  arenaCanvas.width = window.innerWidth;
+  arenaCanvas.height = window.innerHeight;
+}
+
+function resizeMinimapCanvas() {
+  const el = minimapCanvas;
+  const rect = el.getBoundingClientRect();
+  el.width = rect.width * window.devicePixelRatio;
+  el.height = rect.height * window.devicePixelRatio;
+}
+
+window.addEventListener("resize", () => {
+  resizeArenaCanvas();
+  resizeMinimapCanvas();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RENDER LOOP (60fps)
+// ══════════════════════════════════════════════════════════════════════════════
+
+requestAnimationFrame(function rafLoop(ts) {
+  requestAnimationFrame(rafLoop);
+
+  if (!gameState || !gameState.self) {
+    lastRafTime = ts;
+    return;
+  }
+
+  const dt = lastRafTime > 0 ? Math.min(0.1, (ts - lastRafTime) / 1000) : 0;
+  lastRafTime = ts;
+  const lerpT = Math.min(1, dt * 25);
+
+  // Interpolate self
+  if (gameState.self && renderSelf) {
+    renderSelf.x = lerp(renderSelf.x, gameState.self.x, lerpT);
+    renderSelf.y = lerp(renderSelf.y, gameState.self.y, lerpT);
+  }
+
+  // Interpolate nearby
+  (gameState.nearbyPlayers || []).forEach((p) => {
+    const rp = renderNearby[p.id];
+    if (rp) {
+      rp.x = lerp(rp.x, p.x, lerpT);
+      rp.y = lerp(rp.y, p.y, lerpT);
+    }
+  });
+
+  renderArena(ts);
+  renderMinimap();
+});
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ARENA RENDERER
+// ══════════════════════════════════════════════════════════════════════════════
+
+function renderArena(ts) {
+  const ctx = arenaCtx;
+  const self = gameState.self;
+  const arena = gameState.arena;
+  const W = arenaCanvas.width;
+  const H = arenaCanvas.height;
+
+  if (!arena || !self) return;
+
+  const cx = W / 2;
+  const cy = H / 2;
+
+  // Camera follows interpolated self position
+  const camX = renderSelf ? renderSelf.x : self.x;
+  const camY = renderSelf ? renderSelf.y : self.y;
+  const oX = cx - camX * CELL;
+  const oY = cy - camY * CELL;
+
+  // Clear
+  ctx.fillStyle = PALETTE.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Arena background
+  ctx.fillStyle = "#0e1025";
+  ctx.fillRect(
+    Math.max(0, oX),
+    Math.max(0, oY),
+    Math.min(arena.width * CELL, W),
+    Math.min(arena.height * CELL, H),
+  );
+
+  // Grid lines (only visible ones)
+  ctx.strokeStyle = PALETTE.grid;
+  ctx.lineWidth = 0.5;
+  const x0 = Math.max(0, Math.floor(-oX / CELL));
+  const x1 = Math.min(arena.width, Math.ceil((W - oX) / CELL));
+  const y0 = Math.max(0, Math.floor(-oY / CELL));
+  const y1 = Math.min(arena.height, Math.ceil((H - oY) / CELL));
+
+  for (let x = x0; x <= x1; x++) {
+    ctx.beginPath();
+    ctx.moveTo(x * CELL + oX, y0 * CELL + oY);
+    ctx.lineTo(x * CELL + oX, y1 * CELL + oY);
+    ctx.stroke();
+  }
+  for (let y = y0; y <= y1; y++) {
+    ctx.beginPath();
+    ctx.moveTo(x0 * CELL + oX, y * CELL + oY);
+    ctx.lineTo(x1 * CELL + oX, y * CELL + oY);
+    ctx.stroke();
+  }
+
+  // Arena border
+  ctx.strokeStyle = PALETTE.arenaBorder;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = PALETTE.arenaBorder;
+  ctx.shadowBlur = 6;
+  ctx.strokeRect(oX, oY, arena.width * CELL, arena.height * CELL);
+  ctx.shadowBlur = 0;
+
+  // Obstacles
+  for (const obs of arena.obstacles || []) {
+    const rx = obs.x * CELL + oX;
+    const ry = obs.y * CELL + oY;
+    const rw = obs.w * CELL;
+    const rh = obs.h * CELL;
+    // Cull off-screen
+    if (rx + rw < 0 || rx > W || ry + rh < 0 || ry > H) continue;
+    ctx.fillStyle = obs.type === "wall" ? PALETTE.wallFill : PALETTE.crateFill;
+    ctx.strokeStyle =
+      obs.type === "wall" ? PALETTE.wallStroke : PALETTE.crateStroke;
+    ctx.lineWidth = 1;
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeRect(rx, ry, rw, rh);
+  }
+
+  // Projectiles (extrapolated)
+  const dtProj = Math.min(0.05, (ts - lastTickTime) / 1000);
+  const bulletSpeedPerSec = 20;
+  for (const p of gameState.nearbyProjectiles || []) {
+    const px = (p.x + p.dx * bulletSpeedPerSec * dtProj) * CELL + oX;
+    const py = (p.y + p.dy * bulletSpeedPerSec * dtProj) * CELL + oY;
+
+    // Glow
+    ctx.fillStyle = PALETTE.bulletFill;
+    ctx.shadowColor = PALETTE.bulletGlow;
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Trail
+    ctx.strokeStyle = PALETTE.bulletTrail;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px - p.dx * CELL * 0.6, py - p.dy * CELL * 0.6);
+    ctx.stroke();
+  }
+
+  // Other players
+  for (const p of gameState.nearbyPlayers || []) {
+    const rp = renderNearby[p.id];
+    drawPlayer(ctx, rp ? { ...p, x: rp.x, y: rp.y } : p, oX, oY, false);
+  }
+
+  // Self (drawn on top)
+  const selfDraw = renderSelf
+    ? { ...self, x: renderSelf.x, y: renderSelf.y }
+    : self;
+  drawPlayer(ctx, selfDraw, oX, oY, true);
+
+  // Crosshair at center
+  ctx.strokeStyle = "rgba(100, 120, 200, 0.06)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 14]);
+  ctx.beginPath();
+  ctx.moveTo(cx, 0);
+  ctx.lineTo(cx, H);
+  ctx.moveTo(0, cy);
+  ctx.lineTo(W, cy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawPlayer(ctx, p, oX, oY, isSelf) {
+  const px = p.x * CELL + oX;
+  const py = p.y * CELL + oY;
+  const r = 0.5 * CELL;
+
+  if (!p.alive) {
+    ctx.strokeStyle = PALETTE.deadStroke;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px - r * 0.6, py - r * 0.6);
+    ctx.lineTo(px + r * 0.6, py + r * 0.6);
+    ctx.moveTo(px + r * 0.6, py - r * 0.6);
+    ctx.lineTo(px - r * 0.6, py + r * 0.6);
+    ctx.stroke();
+    return;
+  }
+
+  // Self glow ring
+  if (isSelf) {
+    ctx.strokeStyle = PALETTE.selfGlow;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(px, py, r + 5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Body
+  ctx.fillStyle = p.color || "#00d4ff";
+  ctx.shadowColor = p.color || "#00d4ff";
+  ctx.shadowBlur = isSelf ? 12 : 6;
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Border
+  ctx.strokeStyle = PALETTE.playerBorder;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Name
+  ctx.fillStyle = PALETTE.playerName;
+  ctx.font = "600 " + (isSelf ? "12" : "11") + "px Inter, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(isSelf ? "YOU" : p.username || "?", px, py - r - 8);
+
+  // HP bar
+  const bW = r * 2.4;
+  const bH = 4;
+  const bX = px - bW / 2;
+  const bY = py + r + 6;
+  ctx.fillStyle = PALETTE.hpBarBg;
+  ctx.fillRect(bX, bY, bW, bH);
+  const pct = (p.hp || 0) / 100;
+  ctx.fillStyle = pct > 0.5 ? "#00e676" : pct > 0.25 ? "#ffd426" : "#ff3b3b";
+  ctx.fillRect(bX, bY, bW * pct, bH);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MINIMAP RENDERER
+// ══════════════════════════════════════════════════════════════════════════════
+
+function renderMinimap() {
+  if (!gameState || !gameState.arena) return;
+  const ctx = minimapCtx;
+  const arena = gameState.arena;
+  const cW = minimapCanvas.width;
+  const cH = minimapCanvas.height;
+  const scaleX = cW / arena.width;
+  const scaleY = cH / arena.height;
+  const scale = Math.min(scaleX, scaleY);
+  const mapW = arena.width * scale;
+  const mapH = arena.height * scale;
+  const mapOffX = (cW - mapW) / 2;
+  const mapOffY = (cH - mapH) / 2;
+
+  // Clear
+  ctx.clearRect(0, 0, cW, cH);
+  ctx.fillStyle = PALETTE.mapBg;
+  ctx.fillRect(0, 0, cW, cH);
+
+  // Arena area
+  ctx.fillStyle = "#0e1025";
+  ctx.fillRect(mapOffX, mapOffY, mapW, mapH);
+
+  // Border
+  ctx.strokeStyle = PALETTE.mapBorder;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mapOffX, mapOffY, mapW, mapH);
+
+  // Obstacles
+  for (const obs of arena.obstacles || []) {
+    ctx.fillStyle = obs.type === "wall" ? "#2a3060" : "#5a4530";
+    ctx.fillRect(
+      mapOffX + obs.x * scale,
+      mapOffY + obs.y * scale,
+      obs.w * scale,
+      obs.h * scale,
+    );
+  }
+
+  // Projectiles
+  ctx.fillStyle = PALETTE.mapBullet;
+  for (const p of gameState.nearbyProjectiles || []) {
+    ctx.beginPath();
+    ctx.arc(mapOffX + p.x * scale, mapOffY + p.y * scale, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Other players
+  ctx.fillStyle = PALETTE.mapOther;
+  for (const p of gameState.nearbyPlayers || []) {
+    if (!p.alive) continue;
+    ctx.beginPath();
+    ctx.arc(mapOffX + p.x * scale, mapOffY + p.y * scale, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Self
+  if (gameState.self && gameState.self.alive) {
+    const self = gameState.self;
+    const sx = renderSelf ? renderSelf.x : self.x;
+    const sy = renderSelf ? renderSelf.y : self.y;
+    ctx.fillStyle = PALETTE.mapSelf;
+    ctx.shadowColor = PALETTE.mapSelf;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(mapOffX + sx * scale, mapOffY + sy * scale, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // KEYBOARD
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Key mapping.
- * Arrow keys fire a shoot in that cardinal direction (with a named direction).
- * Space fires a shoot at the current aim pad angle.
- * WASD fires movement.
- */
 const KEY_MAP = {
   w: { action: "move", direction: "up" },
   a: { action: "move", direction: "left" },
@@ -369,7 +851,6 @@ const KEY_MAP = {
   d: { action: "move", direction: "right" },
   " ": { action: "shoot", direction: null, useAimAngle: true },
   r: { action: "reload", direction: null },
-  // Arrow keys = cardinal shoot
   ArrowUp: { action: "shoot", direction: "up" },
   ArrowLeft: { action: "shoot", direction: "left" },
   ArrowDown: { action: "shoot", direction: "down" },
@@ -405,23 +886,15 @@ function handleKeyDown(e) {
   let angle = null;
 
   if (action === "move") {
-    lastMoveDir = direction;
     lastMovementKey = keyId;
-    // Add to held movement keys for continuous movement
     heldMovementKeys.add(keyId);
-    // Send immediate first move for responsiveness using the computed angle
-    var moveAngle = getMovementAngle();
-    if (moveAngle !== null) {
-      sendAction("move", null, moveAngle);
-    }
-    // Start continuous movement if not already running
-    if (!movementTimer) {
-      startContinuousMovement();
-    }
+    const moveAngle = getMovementAngle();
+    if (moveAngle !== null) sendAction("move", null, moveAngle);
+    if (!movementTimer) startContinuousMovement();
     return;
   }
+
   if (action === "shoot" && mapping.useAimAngle) {
-    // Space uses aim pad angle
     angle = aimAngle;
     direction = null;
   }
@@ -431,28 +904,19 @@ function handleKeyDown(e) {
 
 function handleKeyUp(e) {
   heldKeys.delete(e.key);
-
-  // Remove from held movement keys
   const keyId = e.key;
   if (["w", "a", "s", "d"].includes(keyId)) {
     heldMovementKeys.delete(keyId);
-    // Update last movement key if this was the current one
     if (lastMovementKey === keyId) {
-      // Pick another held key as the new last movement key
       lastMovementKey =
         heldMovementKeys.size > 0 ? Array.from(heldMovementKeys)[0] : null;
     }
-    // Stop continuous movement if no movement keys are held
-    if (heldMovementKeys.size === 0) {
-      stopContinuousMovement();
-    }
+    if (heldMovementKeys.size === 0) stopContinuousMovement();
   }
 }
 
-// Calculate movement angle (degrees) from all currently held WASD keys.
-// Returns null if no movement keys are held.
 function getMovementAngle() {
-  var dx = 0,
+  let dx = 0,
     dy = 0;
   if (heldMovementKeys.has("w")) dy -= 1;
   if (heldMovementKeys.has("s")) dy += 1;
@@ -462,20 +926,15 @@ function getMovementAngle() {
   return ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
 }
 
-// Continuous movement loop
 function startContinuousMovement() {
-  if (movementTimer) return; // Already running
-
-  movementTimer = setInterval(function () {
+  if (movementTimer) return;
+  movementTimer = setInterval(() => {
     if (!playerId || !localState.alive || heldMovementKeys.size === 0) {
       stopContinuousMovement();
       return;
     }
-
-    var angle = getMovementAngle();
-    if (angle !== null) {
-      sendAction("move", null, angle);
-    }
+    const angle = getMovementAngle();
+    if (angle !== null) sendAction("move", null, angle);
   }, MOVEMENT_TICK_MS);
 }
 
@@ -486,16 +945,12 @@ function stopContinuousMovement() {
   }
 }
 
-// Key box flash
+// Key flash
 const KEY_BOX_MAP = {
   w: KEY_BOXES.w,
   a: KEY_BOXES.a,
   s: KEY_BOXES.s,
   d: KEY_BOXES.d,
-  ArrowUp: KEY_BOXES.up,
-  ArrowLeft: KEY_BOXES.left,
-  ArrowDown: KEY_BOXES.down,
-  ArrowRight: KEY_BOXES.right,
   " ": KEY_BOXES.space,
   r: KEY_BOXES.r,
 };
@@ -504,24 +959,13 @@ function flashKey(keyId) {
   const el = KEY_BOX_MAP[keyId];
   if (!el) return;
   el.classList.add("pressed");
-  setTimeout(function () {
-    el.classList.remove("pressed");
-  }, 120);
+  setTimeout(() => el.classList.remove("pressed"), 120);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ACTION SENDER
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * sendAction(action, direction, angle)
- *
- * direction — cardinal string ('up'/'down'/'left'/'right') or null
- * angle     — degrees (0-359) or null
- *
- * If angle is provided it takes precedence over direction on the server.
- * Only one of direction or angle needs to be set; both can be sent.
- */
 async function sendAction(action, direction, angle) {
   if (!playerId) return;
   angle = typeof angle === "number" ? angle : null;
@@ -546,11 +990,10 @@ async function sendAction(action, direction, angle) {
 
   const dirStr =
     angle !== null
-      ? " \u2192 " + Math.round(angle) + "\u00b0"
+      ? " → " + Math.round(angle) + "°"
       : direction
-        ? " \u2192 " + direction
+        ? " → " + direction
         : "";
-  setLastAction(action + dirStr + " \u2026", "info");
 
   try {
     const res = await apiFetch("/action", "POST", body);
@@ -558,22 +1001,23 @@ async function sendAction(action, direction, angle) {
 
     if (res.status === 429) {
       scheduleRetry(action, direction, angle);
-      addLog("Rate limited — retrying", "warn");
       return;
     }
     if (!res.ok) {
       const msg = data.error || "Unknown error";
-      setLastAction("\u2717 " + action + dirStr + ": " + msg, "err");
-      addLog("\u2717 " + action + dirStr + ": " + msg, "err");
+      setLastAction("✗ " + action + dirStr + ": " + msg, "err");
       if (msg.toLowerCase().includes("cooldown")) {
         scheduleRetry(action, direction, angle);
       }
       return;
     }
 
-    if (data.state && data.state.self) applyState(data.state);
-    setLastAction("\u2713 " + action + dirStr, "ok");
-    addLog("\u2713 " + action + dirStr, "ok");
+    if (data.state) onStateUpdate(data.state);
+    // Only log non-move actions to reduce noise
+    if (action !== "move") {
+      setLastAction("✓ " + action + dirStr, "ok");
+      addLog("✓ " + action + dirStr, "ok");
+    }
   } catch (e) {
     setLastAction("Network error", "err");
   }
@@ -581,7 +1025,7 @@ async function sendAction(action, direction, angle) {
 
 function scheduleRetry(action, direction, angle) {
   if (pendingRetry) return;
-  pendingRetry = setTimeout(function () {
+  pendingRetry = setTimeout(() => {
     pendingRetry = null;
     sendAction(action, direction, angle);
   }, ACTION_RETRY_MS);
@@ -593,13 +1037,12 @@ function scheduleRetry(action, direction, angle) {
 
 function apiFetch(path, method, body) {
   method = method || "GET";
-  const url = serverUrl + path;
   const opts = {
     method: method,
     headers: { "Content-Type": "application/json" },
   };
   if (body) opts.body = JSON.stringify(body);
-  return fetch(url, opts);
+  return fetch(serverUrl + path, opts);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -624,7 +1067,7 @@ function addLog(msg, type) {
 
 function setLastAction(msg, type) {
   lastActionEl.textContent = msg;
-  lastActionEl.className = "last-action " + (type || "ok");
+  lastActionEl.className = "action-toast " + (type || "ok");
 }
 
 function showSetupError(msg) {
