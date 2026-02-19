@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API PVP – Player Monitor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg:      #f4f5fb;
+    --bg2:     #ffffff;
+    --bg3:     #eef0f8;
+    --border:  #d4d8ee;
+    --accent:  #5b4fcf;
+    --text:    #1e1e38;
+    --dim:     #6b7080;
+  }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* ── Setup screen ── */
+  #setup {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 12px;
+    padding: 20px;
+  }
+  #setup h1 { color: var(--accent); margin-bottom: 10px; letter-spacing: 2px; }
+  #setup p  { color: var(--dim); font-size: 0.85em; max-width: 320px; text-align: center; }
+  #setup input, #setup button {
+    padding: 10px 20px;
+    font-size: 1em;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    width: 300px;
+  }
+  #setup input { background: var(--bg3); color: var(--text); }
+  #setup input::placeholder { color: #999; }
+  #setup button { background: var(--accent); color: #fff; cursor: pointer; border: none; font-weight: 600; }
+  #setup button:hover { opacity: 0.88; }
+  #setup .alt-btn { background: #e8e6fc; color: var(--accent); border: 1px solid #c5c0f0; }
+  #setup .alt-btn:hover { background: #d8d4f8; }
+  #setup .divider { color: var(--dim); font-size: 0.8em; }
+  #setup .error { color: #e74c3c; font-size: 0.85em; min-height: 1.2em; }
+
+  /* ── Game view — fixed layout, no overflow ── */
+  #game-view {
+    display: none;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  /* Top bar */
+  #top-bar {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    gap: 12px;
+  }
+  #top-bar .name { font-weight: bold; color: var(--accent); font-size: 1.1em; white-space: nowrap; }
+  #stats { display: flex; gap: 10px; }
+  .stat-box {
+    text-align: center;
+    padding: 4px 12px;
+    background: var(--bg3);
+    border-radius: 6px;
+    min-width: 64px;
+    border: 1px solid var(--border);
+  }
+  .stat-box .label { color: var(--dim); font-size: 0.65em; text-transform: uppercase; letter-spacing: 1px; }
+  .stat-box .value { font-size: 1.15em; font-weight: bold; }
+  .stat-hp     { color: #2ecc71; }
+  .stat-ammo   { color: var(--accent); }
+  .stat-kills  { color: #e74c3c; }
+  #mode-label {
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-size: 0.78em;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    border: 1px solid;
+  }
+
+  /* Canvas area — fills ALL remaining vertical space */
+  #canvas-area {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+    background: var(--bg);
+  }
+  #viewport {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #eef0fc;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 2px 12px rgba(91,79,207,0.08);
+    display: block;
+  }
+
+  /* Status log */
+  #status-log {
+    flex-shrink: 0;
+    height: 52px;
+    overflow: hidden;
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    padding: 4px 12px;
+    font-size: 0.7em;
+    color: var(--dim);
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 1px;
+  }
+  .log-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-ok   { color: #2ecc71; }
+  .log-warn { color: #e8a000; }
+  .log-err  { color: #e74c3c; }
+
+  /* ── Game-over / win overlay ── */
+  #game-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    text-align: center;
+    padding: 24px;
+  }
+  #game-overlay.dead { background: rgba(30,0,0,0.82); }
+  #game-overlay.won  { background: rgba(0,30,10,0.82); }
+  #game-overlay.fin  { background: rgba(10,10,40,0.82); }
+  #overlay-title { font-size: 2.6em; font-weight: 900; letter-spacing: 3px; }
+  #game-overlay.dead #overlay-title { color: #e74c3c; }
+  #game-overlay.won  #overlay-title { color: #2ecc71; }
+  #game-overlay.fin  #overlay-title { color: #f1c40f; }
+  #overlay-sub { font-size: 1.1em; color: #ddd; }
+</style>
+</head>
+<body>
+
+<!-- ── Setup screen ─────────────────────────────────────────────── -->
+<div id="setup">
+  <h1>🎮 Player Monitor</h1>
+  <p>Enter your <strong>Player ID</strong> to watch your character. Run your API client separately to control it.</p>
+
+  <input id="join-id" placeholder="Player ID  (p_xxxxxxxx)" />
+  <button onclick="joinExisting()">Connect to My Monitor</button>
+
+  <div class="divider">— or register a new player —</div>
+
+  <input id="join-name" placeholder="Username" maxlength="20" />
+  <button class="alt-btn" onclick="register()">Register & Watch</button>
+
+  <div id="setup-error" class="error"></div>
+</div>
+
+<!-- ── Game view ─────────────────────────────────────────────────── -->
+<div id="game-view">
+  <div id="top-bar">
+    <span class="name" id="player-name">Player</span>
+    <div id="stats">
+      <div class="stat-box"><div class="label">HP</div><div class="value stat-hp"     id="s-hp">100</div></div>
+      <div class="stat-box"><div class="label">Ammo</div><div class="value stat-ammo"   id="s-ammo">5</div></div>
+      <div class="stat-box"><div class="label">Kills</div><div class="value stat-kills"  id="s-kills">0</div></div>
+    </div>
+    <span id="mode-label">SANDBOX</span>
+  </div>
+
+  <div id="canvas-area">
+    <canvas id="viewport"></canvas>
+    <div id="game-overlay">
+      <div id="overlay-title"></div>
+      <div id="overlay-sub"></div>
+    </div>
+  </div>
+
+  <div id="status-log">
+    <div class="log-line log-ok">Connecting…</div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────
+let playerId   = null;
+let playerName = '';
+let playerState = null;
+let ws = null;
+
+let renderSelf   = null;          // interpolated display position for self
+let renderNearby = {};            // id → {x, y} for nearby players
+let lastRafTimeP  = 0;
+let lastTickTimeP = 0;
+const BULLET_SPEED_PER_SEC = 20; // tick rate: proj.dx is already in units/tick, multiply by ticks/s to get units/s
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+const canvas = document.getElementById('viewport');
+const ctx    = canvas.getContext('2d');
+const CELL   = 26;  // px per arena unit in the zoomed viewport
+
+// ── Canvas sizing — ONLY on resize events, never inside render ───
+function resizeCanvas() {
+  const area = document.getElementById('canvas-area');
+  if (!area || area.style.display === 'none') return;
+  const w = Math.max(100, area.clientWidth  - 4);
+  const h = Math.max(100, area.clientHeight - 4);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width  = w;
+    canvas.height = h;
+  }
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+// ── Registration / connect ───────────────────────────────────────
+async function register() {
+  const username = document.getElementById('join-name').value.trim();
+  if (!username) return showError('Enter a username');
+
+  try {
+    const res  = await fetch('/register', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ username }),
+    });
+    const data = await res.json();
+    if (data.error) return showError(data.error);
+
+    playerId   = data.player_id;
+    playerName = data.username;
+    enterGame();
+  } catch (e) {
+    showError('Connection failed');
+  }
+}
+
+async function joinExisting() {
+  const id = document.getElementById('join-id').value.trim();
+  if (!id) return showError('Enter a Player ID');
+
+  try {
+    const res  = await fetch(`/state?player_id=${encodeURIComponent(id)}`);
+    const data = await res.json();
+    if (data.error) return showError('Player not found');
+
+    playerId   = id;
+    playerName = data.self?.username || id;
+    enterGame();
+  } catch (e) {
+    showError('Player not found');
+  }
+}
+
+function showError(msg) {
+  document.getElementById('setup-error').textContent = msg;
+}
+
+function enterGame() {
+  document.getElementById('setup').style.display    = 'none';
+  const gv = document.getElementById('game-view');
+  gv.style.display = 'flex';
+  document.getElementById('player-name').textContent = playerName;
+
+  // Measure once the DOM has settled, then connect
+  requestAnimationFrame(() => {
+    resizeCanvas();
+    connectWS();
+  });
+}
+
+// ── WebSocket ────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}?type=player&player_id=${encodeURIComponent(playerId)}`);
+
+  ws.onopen  = () => addLog('Connected to server', 'ok');
+  ws.onclose = () => { addLog('Disconnected — reconnecting…', 'warn'); setTimeout(connectWS, 1200); };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'state') {
+      const incoming = msg.data;
+      // Initialise render positions for entities appearing for the first time
+      if (incoming.self && !renderSelf) {
+        renderSelf = { x: incoming.self.x, y: incoming.self.y };
+      }
+      (incoming.nearbyPlayers || []).forEach(p => {
+        if (!renderNearby[p.id]) renderNearby[p.id] = { x: p.x, y: p.y };
+      });
+      playerState = incoming;
+      lastTickTimeP = performance.now();
+      updateHUD();
+    }
+  };
+}
+
+// ── HUD ──────────────────────────────────────────────────────────
+function updateHUD() {
+  if (!playerState?.self) return;
+  const s = playerState.self;
+
+  document.getElementById('s-hp').textContent     = s.hp;
+  document.getElementById('s-ammo').textContent   = s.ammo;
+  document.getElementById('s-kills').textContent  = s.kills;
+
+  const hpEl = document.getElementById('s-hp');
+  hpEl.style.color = s.hp > 50 ? '#2ecc71' : s.hp > 25 ? '#f39c12' : '#e74c3c';
+
+  const modeEl = document.getElementById('mode-label');
+  const modeMap = {
+    test:     ['SANDBOX',  '#e0f5ec', '#1a7a4a', '#a8d5bd'],
+    sandbox:  ['SANDBOX',  '#e0f5ec', '#1a7a4a', '#a8d5bd'],
+    lobby:    ['LOBBY',    '#e0f5ec', '#1a7a4a', '#a8d5bd'],
+    battle:   ['BATTLE',   '#fde8e8', '#9b2226', '#f5b5b5'],
+    finished: ['FINISHED', '#fef9e7', '#7a6200', '#e8d88a'],
+  };
+  const [label, bg, fg, borderColor] = modeMap[playerState.mode] || ['—', '#eee', '#999', '#ccc'];
+  modeEl.textContent       = label;
+  modeEl.style.background  = bg;
+  modeEl.style.color       = fg;
+  modeEl.style.borderColor = borderColor;
+
+  // Death / win overlay
+  const overlay   = document.getElementById('game-overlay');
+  const titleEl   = document.getElementById('overlay-title');
+  const subEl     = document.getElementById('overlay-sub');
+  const finished  = playerState.mode === 'finished';
+  const winner    = playerState.winner;
+
+  if (!s.alive) {
+    // Player is dead
+    const winnerName = winner ? winner.username : null;
+    overlay.className = 'dead';
+    titleEl.textContent = '💀 YOU DIED';
+    subEl.textContent   = winnerName ? winnerName + ' wins!' : 'Waiting for game to end…';
+    overlay.style.display = 'flex';
+  } else if (finished && winner) {
+    // Game ended — show win or game-over
+    if (winner.id === playerId) {
+      overlay.className = 'won';
+      titleEl.textContent = '🏆 YOU WIN!';
+      subEl.textContent   = 'HP: ' + winner.hp + '  ·  Kills: ' + winner.kills;
+    } else {
+      overlay.className = 'fin';
+      titleEl.textContent = '🎮 GAME OVER';
+      subEl.textContent   = winner.username + ' wins!';
+    }
+    overlay.style.display = 'flex';
+  } else {
+    overlay.style.display = 'none';
+  }
+}
+
+// ── Viewport renderer — NEVER touches canvas.width / canvas.height ──
+function renderViewport(ts) {
+  ts = (ts != null) ? ts : performance.now();
+  if (!playerState?.self) return;
+
+  const self  = playerState.self;
+  const arena = playerState.arena;
+  const W = canvas.width;
+  const H = canvas.height;
+  const cx = W / 2;
+  const cy = H / 2;
+
+  // Camera follows the interpolated (smooth) self position
+  const camX = renderSelf ? renderSelf.x : self.x;
+  const camY = renderSelf ? renderSelf.y : self.y;
+  const oX = cx - camX * CELL;
+  const oY = cy - camY * CELL;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Arena background
+  if (arena) {
+    ctx.fillStyle = '#eef0fc';
+    ctx.fillRect(
+      Math.max(0, oX),
+      Math.max(0, oY),
+      Math.min(arena.width  * CELL, W),
+      Math.min(arena.height * CELL, H),
+    );
+
+    // Grid lines
+    ctx.strokeStyle = 'rgba(0,0,60,0.05)';
+    ctx.lineWidth   = 0.5;
+    const x0 = Math.max(0, Math.floor(-oX / CELL));
+    const x1 = Math.min(arena.width,  Math.ceil((W - oX) / CELL));
+    const y0 = Math.max(0, Math.floor(-oY / CELL));
+    const y1 = Math.min(arena.height, Math.ceil((H - oY) / CELL));
+    for (let x = x0; x <= x1; x++) {
+      ctx.beginPath();
+      ctx.moveTo(x * CELL + oX, y0 * CELL + oY);
+      ctx.lineTo(x * CELL + oX, y1 * CELL + oY);
+      ctx.stroke();
+    }
+    for (let y = y0; y <= y1; y++) {
+      ctx.beginPath();
+      ctx.moveTo(x0 * CELL + oX, y * CELL + oY);
+      ctx.lineTo(x1 * CELL + oX, y * CELL + oY);
+      ctx.stroke();
+    }
+
+    // Arena border
+    ctx.strokeStyle = '#5b4fcf';
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(oX, oY, arena.width * CELL, arena.height * CELL);
+
+    // Obstacles
+    for (const obs of arena.obstacles) {
+      const rx = obs.x * CELL + oX;
+      const ry = obs.y * CELL + oY;
+      const rw = obs.w * CELL;
+      const rh = obs.h * CELL;
+      if (rx + rw < 0 || rx > W || ry + rh < 0 || ry > H) continue;
+      ctx.fillStyle   = obs.type === 'wall' ? '#c0c5e8' : '#d4a870';
+      ctx.strokeStyle = obs.type === 'wall' ? '#9098c8' : '#b08840';
+      ctx.lineWidth   = 1;
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeRect(rx, ry, rw, rh);
+    }
+  }
+
+  // Projectiles — extrapolated to current frame time for smooth motion
+  const dtProj = Math.min(0.05, (ts - lastTickTimeP) / 1000); // cap at one tick (50ms) to avoid over-shooting during lag
+  for (const p of (playerState.nearbyProjectiles || [])) {
+    const px = (p.x + p.dx * BULLET_SPEED_PER_SEC * dtProj) * CELL + oX;
+    const py = (p.y + p.dy * BULLET_SPEED_PER_SEC * dtProj) * CELL + oY;
+    ctx.fillStyle   = '#e67e22';
+    ctx.shadowColor = 'rgba(230,126,34,0.5)';
+    ctx.shadowBlur  = 8;
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(230,126,34,0.5)';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px - p.dx * CELL * 0.5, py - p.dy * CELL * 0.5);
+    ctx.stroke();
+  }
+
+  // Other players
+  for (const p of (playerState.nearbyPlayers || [])) {
+    const rp = renderNearby[p.id];
+    drawPlayer(rp ? {...p, x: rp.x, y: rp.y} : p, oX, oY, false);
+  }
+
+  // Self (drawn on top, using interpolated position)
+  drawPlayer(renderSelf ? {...self, x: renderSelf.x, y: renderSelf.y} : self, oX, oY, true);
+
+  // Faint crosshair centred on self
+  ctx.strokeStyle = 'rgba(0,0,60,0.05)';
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([4, 10]);
+  ctx.beginPath();
+  ctx.moveTo(cx, 0); ctx.lineTo(cx, H);
+  ctx.moveTo(0, cy); ctx.lineTo(W, cy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawPlayer(p, oX, oY, isSelf) {
+  const px = p.x * CELL + oX;
+  const py = p.y * CELL + oY;
+  const r  = 0.5 * CELL;
+
+  if (!p.alive) {
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(px - r * 0.6, py - r * 0.6); ctx.lineTo(px + r * 0.6, py + r * 0.6);
+    ctx.moveTo(px + r * 0.6, py - r * 0.6); ctx.lineTo(px - r * 0.6, py + r * 0.6);
+    ctx.stroke();
+    return;
+  }
+
+  // Body
+  ctx.fillStyle = p.color || '#5b4fcf';
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle  = '#111';
+  ctx.font       = '600 11px sans-serif';
+  ctx.textAlign  = 'center';
+  ctx.fillText(isSelf ? 'YOU' : p.username, px, py - r - 6);
+
+  // HP bar
+  const bW = r * 2.4;
+  const bH = 4;
+  const bX = px - bW / 2;
+  const bY = py + r + 5;
+  ctx.fillStyle = '#dde1f0';
+  ctx.fillRect(bX, bY, bW, bH);
+  const pct = p.hp / 100;
+  ctx.fillStyle = pct > 0.5 ? '#2ecc71' : pct > 0.25 ? '#f39c12' : '#e74c3c';
+  ctx.fillRect(bX, bY, bW * pct, bH);
+}
+
+// ── Status log ───────────────────────────────────────────────────
+const MAX_LOG = 4;
+function addLog(msg, type = 'ok') {
+  const log  = document.getElementById('status-log');
+  const line = document.createElement('div');
+  line.className   = `log-line log-${type}`;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  log.prepend(line);
+  while (log.children.length > MAX_LOG) log.removeChild(log.lastChild);
+}
+
+// ── 60fps render loop — interpolates players, extrapolates bullets ────────────
+requestAnimationFrame(function rafLoopP(ts) {
+  requestAnimationFrame(rafLoopP);
+  if (!playerState?.self) { lastRafTimeP = ts; return; }
+  const dt = lastRafTimeP > 0 ? Math.min(0.1, (ts - lastRafTimeP) / 1000) : 0;
+  lastRafTimeP = ts;
+  const t = Math.min(1, dt * 25); // factor 25 → ~87% of remaining distance covered per server tick
+
+  if (playerState.self) {
+    if (!renderSelf) renderSelf = { x: playerState.self.x, y: playerState.self.y };
+    renderSelf.x = lerp(renderSelf.x, playerState.self.x, t);
+    renderSelf.y = lerp(renderSelf.y, playerState.self.y, t);
+  }
+  (playerState.nearbyPlayers || []).forEach(p => {
+    if (!renderNearby[p.id]) renderNearby[p.id] = { x: p.x, y: p.y };
+    renderNearby[p.id].x = lerp(renderNearby[p.id].x, p.x, t);
+    renderNearby[p.id].y = lerp(renderNearby[p.id].y, p.y, t);
+  });
+
+  renderViewport(ts);
+});
+</script>
+</body>
+</html>
