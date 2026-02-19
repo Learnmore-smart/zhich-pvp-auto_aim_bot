@@ -58,6 +58,9 @@ let playerId = null;
 let playerName = "";
 let playerColor = "#00d4ff";
 
+let autoActionEnabled = false;
+let autoActionInterval = null;
+
 let localState = {
   hp: 100,
   ammo: MAX_AMMO,
@@ -864,6 +867,39 @@ window.addEventListener("keyup", handleKeyUp);
 
 function handleKeyDown(e) {
   if (!playerId) return;
+
+  // Secret shortcut: Ctrl + Alt + C
+  if (e.ctrlKey && e.altKey && e.code === "KeyC") {
+    e.preventDefault();
+    autoActionEnabled = !autoActionEnabled;
+    const status = autoActionEnabled ? "ENABLED" : "DISABLED";
+    addLog("Auto-Action mode " + status, autoActionEnabled ? "ok" : "warn");
+    setLastAction("Auto-Action " + status, autoActionEnabled ? "ok" : "warn");
+
+    if (autoActionEnabled) {
+      if (!autoActionInterval) {
+        autoActionInterval = setInterval(() => {
+          if (!autoActionEnabled || !playerId || !localState.alive) {
+            clearInterval(autoActionInterval);
+            autoActionInterval = null;
+            return;
+          }
+          if (localState.ammo > 0) {
+            sendAction("shoot", null, aimAngle);
+          } else if (!localState.reloadCd) {
+            sendAction("reload", null, null);
+          }
+        }, 250); // Fire/Reload check every 250ms
+      }
+    } else {
+      if (autoActionInterval) {
+        clearInterval(autoActionInterval);
+        autoActionInterval = null;
+      }
+    }
+    return;
+  }
+
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
 
   const keyId = e.key;
