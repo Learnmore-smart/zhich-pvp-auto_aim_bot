@@ -60,8 +60,8 @@ async function runTest() {
     }
     console.log(`Ammo after refill: ${stateData2.self.ammo}`);
 
-    if (stateData2.self.ammo === 50) {
-      console.log("SUCCESS: Ammo is infinite (auto-refilled).");
+    if (stateData2.self.ammo === 5) {
+      console.log("SUCCESS: Ammo is auto-refilled to 5.");
     } else {
       console.error("FAIL: Ammo did not refill.");
       process.exit(1);

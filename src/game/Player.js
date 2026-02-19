@@ -67,8 +67,12 @@ class Player {
   }
 
   tickCooldowns() {
-    this.reloadCooldown = 0;
-    this.ammo = this.maxAmmo;
+    if (this.reloadCooldown > 0) {
+      this.reloadCooldown--;
+      if (this.reloadCooldown === 0) {
+        this.ammo = this.maxAmmo;
+      }
+    }
   }
 
   reset(x, y) {

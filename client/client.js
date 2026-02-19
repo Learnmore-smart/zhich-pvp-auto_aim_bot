@@ -20,7 +20,7 @@ const DEFAULT_SERVER = "https://api-pvp-production.up.railway.app";
 const POLL_INTERVAL_MS = 200;
 const ACTION_RETRY_MS = 80;
 const MAX_LOG_ENTRIES = 40;
-const MAX_AMMO = 5;
+const MAX_AMMO = 50;
 const MOVEMENT_TICK_MS = 50;
 const CELL = 26; // px per arena unit
 
@@ -984,33 +984,26 @@ function handleKeyDown(e) {
 
           const self = gameState.self;
           if (self && gameState.nearbyPlayers) {
-            let nearestVisible = null;
-            let nearestVisibleDist = Infinity;
-            let nearestHidden = null;
-            let nearestHiddenDist = Infinity;
+            let nearest = null;
+            let nearestDist = Infinity;
 
             gameState.nearbyPlayers.forEach((p) => {
               if (!p.alive || window.botBlacklist[p.id]) return;
+              // Check if wall is blocking us
+              if (!botHasLineOfSight(self.x, self.y, p.x, p.y)) return;
+
               const dx = p.x - self.x;
               const dy = p.y - self.y;
               const dist = Math.sqrt(dx * dx + dy * dy);
               const extendedP = { ...p, dx, dy, dist };
 
-              if (botHasLineOfSight(self.x, self.y, p.x, p.y)) {
-                if (dist < nearestVisibleDist) {
-                  nearestVisibleDist = dist;
-                  nearestVisible = extendedP;
-                }
-              } else {
-                if (dist < nearestHiddenDist) {
-                  nearestHiddenDist = dist;
-                  nearestHidden = extendedP;
-                }
+              if (dist < nearestDist) {
+                nearestDist = dist;
+                nearest = extendedP;
               }
             });
 
-            // Find the absolute closest enemy to shoot at, preferring visible ones, but picking hidden if closer.
-            const target = nearestVisible || nearestHidden;
+            const target = nearest;
 
             if (target) {
               const dx = target.dx;
@@ -1019,35 +1012,56 @@ function handleKeyDown(e) {
 
               if (window.botTargetId !== target.id) {
                 window.botTargetId = target.id;
-                window.botTargetShots = 0;
               }
 
               const aimAngleDeg =
                 ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
               setAimAngle(aimAngleDeg);
 
-              // ALWAYS shoot at the target, even if behind a wall, because bullets penetrate!
-              sendAction("shoot", null, aimAngleDeg);
+              const time = performance.now();
 
-              window.botTargetShots++;
-              if (window.botTargetShots > 15 && dist > 2) {
-                // If we shot 15 bullets and they aren't dying (e.g. they are strafing perfectly), swap target!
-                window.botBlacklist[target.id] = now + 4000;
-                window.botTargetId = null;
+              if (localState.ammo <= 0 && !localState.reloadCd) {
+                sendAction("reload");
+              } else if (
+                localState.ammo > 0 &&
+                (!window.botWaitStateUpdate || time > window.botWaitStateUpdate)
+              ) {
+                // Shoot all bullets at once
+                const shots = Math.min(50, localState.ammo);
+                for (let i = 0; i < shots; i++) {
+                  // Slight spread to cover dodges
+                  const spread = (Math.random() - 0.5) * 8;
+                  sendAction("shoot", null, (aimAngleDeg + spread + 360) % 360);
+                }
+                // Wait to prevent spamming while server syncs ammo state
+                window.botWaitStateUpdate = time + 400;
               }
 
-              // S-Wave approach movement:
-              const time = performance.now();
-              const waveMagnitude = 60;
-              const waveRate = 300;
-              const weaveOffset = Math.sin(time / waveRate) * waveMagnitude;
+              // MAINTAIN DISTANCE MOVEMENT & ERRATIC JITTER:
+              if (!window.botMoveState || time > window.botMoveState.until) {
+                // Pick a random strafe direction
+                let angleBase;
+                if (dist < 7) {
+                  // Close: run away in a zigzag
+                  angleBase = aimAngleDeg + 180 + (Math.random() * 120 - 60);
+                } else if (dist > 16) {
+                  // Far: approach zig zag
+                  angleBase = aimAngleDeg + (Math.random() * 90 - 45);
+                } else {
+                  // Mid-range: strafe perpendicular with some variance
+                  const strafeDir = Math.random() > 0.5 ? 90 : -90;
+                  angleBase =
+                    aimAngleDeg + strafeDir + (Math.random() * 45 - 22.5);
+                }
 
-              let desiredAngle = aimAngleDeg;
-              if (dist < 4)
-                desiredAngle = (aimAngleDeg + 180 + weaveOffset) % 360; // back away
-              else desiredAngle = (aimAngleDeg + weaveOffset + 360) % 360; // weave towards
+                window.botMoveState = {
+                  angle: (angleBase + 360) % 360,
+                  until: time + 300 + Math.random() * 400, // hold direction for 300-700ms
+                };
+              }
+              let desiredAngle = window.botMoveState.angle;
 
-              // Raycast fan to find a walkable direction! Check the desired angle first, then fan outwards.
+              // Raycast fan to find a walkable direction so it doesn't back into a wall!
               let bestAngle = desiredAngle;
               const offsets = [0, 45, -45, 90, -90, 135, -135, 180];
               for (const off of offsets) {
@@ -1186,9 +1200,9 @@ async function sendAction(action, direction = null, angle = null) {
   if (!playerId || localState.mode === "finished") return;
   if (!localState.alive && action !== "spawn") return;
 
-  // God Mode: No shoot blocking
+  // Client-side block for shooting (no optimistic decrement to prevent locking)
   if (action === "shoot") {
-    // Fire freely
+    if (localState.ammo <= 0 || localState.reloadCd) return;
   }
 
   // angle = typeof angle === "number" ? angle : null; // This line is now redundant due to default param
