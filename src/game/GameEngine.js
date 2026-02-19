@@ -1,18 +1,18 @@
-const { v4: uuidv4 } = require('uuid');
-const Arena = require('./Arena');
-const Player = require('./Player');
-const Projectile = require('./Projectile');
-const C = require('./constants');
+const { v4: uuidv4 } = require("uuid");
+const Arena = require("./Arena");
+const Player = require("./Player");
+const Projectile = require("./Projectile");
+const C = require("./constants");
 
 class GameEngine {
   constructor() {
     this.arena = new Arena();
-    this.players = new Map();       // id → Player
-    this.projectiles = new Map();   // id → Projectile
-    this.mode = C.MODE_TEST;        // test | lobby | battle | finished
+    this.players = new Map(); // id → Player
+    this.projectiles = new Map(); // id → Projectile
+    this.mode = C.MODE_TEST; // test | lobby | battle | finished
     this.tickCount = 0;
     this.tickInterval = null;
-    this.onStateUpdate = null;      // callback(state)
+    this.onStateUpdate = null; // callback(state)
     this.battleLog = [];
     this.winner = null;
   }
@@ -23,12 +23,15 @@ class GameEngine {
     // Prevent duplicate usernames
     for (const p of this.players.values()) {
       if (p.username === username) {
-        return { error: 'Username already taken', player: p };
+        return { error: "Username already taken", player: p };
       }
     }
 
-    const id = forceId || ('p_' + uuidv4().slice(0, 8));
-    const existingPositions = [...this.players.values()].map(p => ({ x: p.x, y: p.y }));
+    const id = forceId || "p_" + uuidv4().slice(0, 8);
+    const existingPositions = [...this.players.values()].map((p) => ({
+      x: p.x,
+      y: p.y,
+    }));
     const spawn = this.arena.getSpawnPoint(existingPositions);
     const player = new Player(id, username, spawn.x, spawn.y, forceColor);
     this.players.set(id, player);
@@ -51,28 +54,31 @@ class GameEngine {
 
   submitAction(playerId, action, direction, angle = null) {
     const player = this.players.get(playerId);
-    if (!player || !player.alive) return { error: 'Invalid player or player is dead' };
+    if (!player || !player.alive)
+      return { error: "Invalid player or player is dead" };
 
     // Validate action
-    const validActions = ['move', 'shoot', 'reload'];
+    const validActions = ["move", "shoot", "reload"];
     if (!validActions.includes(action)) {
       return { error: `Invalid action: ${action}` };
     }
 
     // Validate direction for directional actions — accept named direction OR numeric angle
-    if (['move', 'shoot'].includes(action)) {
-      const hasAngle     = typeof angle === 'number' && isFinite(angle);
+    if (["move", "shoot"].includes(action)) {
+      const hasAngle = typeof angle === "number" && isFinite(angle);
       const hasDirection = direction && C.DIRECTIONS[direction];
       if (!hasAngle && !hasDirection) {
-        return { error: `Provide direction (up/down/left/right) or angle in degrees (0–360) for '${action}'` };
+        return {
+          error: `Provide direction (up/down/left/right) or angle in degrees (0–360) for '${action}'`,
+        };
       }
     }
 
     // Normalise angle to [0, 360)
-    if (typeof angle === 'number') angle = ((angle % 360) + 360) % 360;
+    if (typeof angle === "number") angle = ((angle % 360) + 360) % 360;
 
     // Queue action — tick loop processes it (both battle and sandbox run a tick loop)
-    player.pendingAction = { action, direction, angle };
+    player.pendingActions.push({ action, direction, angle });
 
     return { success: true };
   }
@@ -81,14 +87,18 @@ class GameEngine {
 
   setReady(playerId) {
     const player = this.players.get(playerId);
-    if (!player) return { error: 'Player not found' };
+    if (!player) return { error: "Player not found" };
     player.ready = true;
-    return { success: true, readyCount: this._readyCount(), totalPlayers: this.players.size };
+    return {
+      success: true,
+      readyCount: this._readyCount(),
+      totalPlayers: this.players.size,
+    };
   }
 
   startBattle() {
     if (this.players.size < 1) {
-      return { error: 'Need at least 1 player to start' };
+      return { error: "Need at least 1 player to start" };
     }
 
     this.mode = C.MODE_BATTLE;
@@ -110,7 +120,7 @@ class GameEngine {
     // Start tick loop
     this._startTickLoop();
 
-    return { success: true, message: 'Battle started!' };
+    return { success: true, message: "Battle started!" };
   }
 
   startSandbox() {
@@ -149,8 +159,7 @@ class GameEngine {
     // 3. Check projectile ↔ player collisions
     this._checkProjectileCollisions();
 
-    // 4. Check projectile ↔ wall/obstacle collisions
-    this._checkProjectileWallCollisions();
+    // 4. Bullets penetrate obstacles — wall collision check removed
 
     // 5. Tick cooldowns
     this._tickCooldowns();
@@ -171,22 +180,34 @@ class GameEngine {
 
   _processActions() {
     for (const player of this.players.values()) {
-      if (!player.alive || !player.pendingAction) continue;
+      if (!player.alive || player.pendingActions.length === 0) continue;
 
-      const { action, direction, angle } = player.pendingAction;
-      player.pendingAction = null;
+      const actions = [...player.pendingActions];
+      player.pendingActions = [];
 
-      switch (action) {
-        case 'move':   this._handleMove(player, direction, angle);   break;
-        case 'shoot':  this._handleShoot(player, direction, angle);  break;
-        case 'reload': this._handleReload(player);                   break;
+      for (const { action, direction, angle } of actions) {
+        switch (action) {
+          case "move":
+            this._handleMove(player, direction, angle);
+            break;
+          case "shoot":
+            if (player.ammo <= 0 && !player.isReloading) {
+              player.reloadCooldown = C.RELOAD_COOLDOWN_TICKS;
+            } else if (!player.isReloading) {
+              this._handleShoot(player, direction, angle);
+            }
+            break;
+          case "reload":
+            this._handleReload(player);
+            break;
+        }
       }
     }
   }
 
   _handleMove(player, direction, angle = null) {
     let dx, dy;
-    if (typeof angle === 'number') {
+    if (typeof angle === "number") {
       const rad = (angle * Math.PI) / 180;
       dx = Math.cos(rad);
       dy = Math.sin(rad);
@@ -204,7 +225,10 @@ class GameEngine {
       let blocked = false;
       for (const other of this.players.values()) {
         if (other.id === player.id || !other.alive) continue;
-        if (Math.hypot(newX - other.x, newY - other.y) < player.size + other.size) {
+        if (
+          Math.hypot(newX - other.x, newY - other.y) <
+          player.size + other.size
+        ) {
           blocked = true;
           break;
         }
@@ -217,9 +241,6 @@ class GameEngine {
   }
 
   _handleShoot(player, direction, angle = null) {
-    if (player.ammo <= 0) return;
-    if (player.isReloading) return;
-
     let bulletCount = 0;
     for (const p of this.projectiles.values()) {
       if (p.ownerId === player.id && p.alive) bulletCount++;
@@ -227,7 +248,7 @@ class GameEngine {
     if (bulletCount >= C.MAX_BULLETS_PER_PLAYER) return;
 
     let dx, dy;
-    if (typeof angle === 'number') {
+    if (typeof angle === "number") {
       const rad = (angle * Math.PI) / 180;
       dx = Math.cos(rad);
       dy = Math.sin(rad);
@@ -243,13 +264,20 @@ class GameEngine {
     dx /= len;
     dy /= len;
 
-    player.ammo--;
+    // Spawn bullet slightly in front of the player
+    const id = "b_" + uuidv4().slice(0, 8);
+    const spawnX = player.x + dx * (player.size + C.BULLET_SIZE + 0.1);
+    const spawnY = player.y + dy * (player.size + C.BULLET_SIZE + 0.1);
 
-    const id = 'b_' + uuidv4().slice(0, 8);
-    const spawnX = player.x + dx * (player.size + 0.2);
-    const spawnY = player.y + dy * (player.size + 0.2);
     const projectile = new Projectile(id, player.id, spawnX, spawnY, dx, dy);
     this.projectiles.set(id, projectile);
+
+    player.ammo--;
+
+    // Auto-reload when magazine is empty
+    if (player.ammo <= 0) {
+      player.reloadCooldown = C.RELOAD_COOLDOWN_TICKS;
+    }
   }
 
   _handleReload(player) {
@@ -278,7 +306,14 @@ class GameEngine {
         if (player.id === proj.ownerId) continue; // no self-hit
 
         // Minimum distance from the player centre to the bullet's path segment this tick
-        const dist = GameEngine._pointSegDist(player.x, player.y, prevX, prevY, proj.x, proj.y);
+        const dist = GameEngine._pointSegDist(
+          player.x,
+          player.y,
+          prevX,
+          prevY,
+          proj.x,
+          proj.y,
+        );
         if (dist < proj.size + player.size) {
           // Hit!
           const dmg = player.takeDamage(proj.damage);
@@ -292,7 +327,7 @@ class GameEngine {
               shooter.kills++;
               this.battleLog.push({
                 tick: this.tickCount,
-                event: 'kill',
+                event: "kill",
                 killer: shooter.username,
                 victim: player.username,
               });
@@ -301,7 +336,7 @@ class GameEngine {
 
           this.battleLog.push({
             tick: this.tickCount,
-            event: 'hit',
+            event: "hit",
             shooter: proj.ownerId,
             target: player.id,
             damage: dmg,
@@ -313,14 +348,7 @@ class GameEngine {
     }
   }
 
-  _checkProjectileWallCollisions() {
-    for (const proj of this.projectiles.values()) {
-      if (!proj.alive) continue;
-      if (this.arena.isBlocked(proj.x, proj.y, proj.size)) {
-        proj.destroy();
-      }
-    }
-  }
+  // Wall collision removed — bullets penetrate obstacles
 
   _tickCooldowns() {
     for (const player of this.players.values()) {
@@ -330,7 +358,17 @@ class GameEngine {
 
   _cleanupProjectiles() {
     for (const [id, proj] of this.projectiles) {
-      if (!proj.alive) this.projectiles.delete(id);
+      if (!proj.alive) {
+        this.projectiles.delete(id);
+      } else if (
+        proj.x < -10 ||
+        proj.y < -10 ||
+        proj.x > this.arena.width + 10 ||
+        proj.y > this.arena.height + 10
+      ) {
+        // Garbage collect deep out-of-bounds bullets floating in the void
+        this.projectiles.delete(id);
+      }
     }
   }
 
@@ -341,7 +379,7 @@ class GameEngine {
       return;
     }
 
-    const alivePlayers = [...this.players.values()].filter(p => p.alive);
+    const alivePlayers = [...this.players.values()].filter((p) => p.alive);
     if (alivePlayers.length <= 1 && this.players.size > 1) {
       this._endBattle();
     }
@@ -352,7 +390,7 @@ class GameEngine {
     this.mode = C.MODE_FINISHED;
 
     // Determine winner
-    const alivePlayers = [...this.players.values()].filter(p => p.alive);
+    const alivePlayers = [...this.players.values()].filter((p) => p.alive);
     if (alivePlayers.length === 1) {
       this.winner = alivePlayers[0];
     } else {
@@ -363,8 +401,8 @@ class GameEngine {
 
     this.battleLog.push({
       tick: this.tickCount,
-      event: 'game_over',
-      winner: this.winner ? this.winner.username : 'none',
+      event: "game_over",
+      winner: this.winner ? this.winner.username : "none",
     });
 
     // Broadcast final state
@@ -388,8 +426,10 @@ class GameEngine {
       mode: this.mode,
       tick: this.tickCount,
       arena: this.arena.toJSON(),
-      players: [...this.players.values()].map(p => p.toJSON()),
-      projectiles: [...this.projectiles.values()].filter(p => p.alive).map(p => p.toJSON()),
+      players: [...this.players.values()].map((p) => p.toJSON()),
+      projectiles: [...this.projectiles.values()]
+        .filter((p) => p.alive)
+        .map((p) => p.toJSON()),
       winner: this.winner ? this.winner.toJSON() : null,
     };
   }
@@ -401,12 +441,19 @@ class GameEngine {
     // Get nearby projectiles (within viewport)
     const viewRange = 12;
     const nearbyProjectiles = [...this.projectiles.values()]
-      .filter(p => p.alive && Math.hypot(p.x - player.x, p.y - player.y) < viewRange)
-      .map(p => p.toJSON());
+      .filter(
+        (p) =>
+          p.alive && Math.hypot(p.x - player.x, p.y - player.y) < viewRange,
+      )
+      .map((p) => p.toJSON());
 
     const nearbyPlayers = [...this.players.values()]
-      .filter(p => p.id !== playerId && Math.hypot(p.x - player.x, p.y - player.y) < viewRange)
-      .map(p => p.toJSON());
+      .filter(
+        (p) =>
+          p.id !== playerId &&
+          Math.hypot(p.x - player.x, p.y - player.y) < viewRange,
+      )
+      .map((p) => p.toJSON());
 
     return {
       mode: this.mode,
@@ -424,14 +471,14 @@ class GameEngine {
       mode: this.mode,
       tick: this.tickCount,
       arena: this.arena.toJSON(),
-      players: [...this.players.values()].map(p => ({
+      players: [...this.players.values()].map((p) => ({
         ...p.toJSON(),
         ammo: p.ammo,
         pendingAction: p.pendingAction,
         reloadCooldown: p.reloadCooldown,
         damageDealt: p.damageDealt,
       })),
-      projectiles: [...this.projectiles.values()].map(p => ({
+      projectiles: [...this.projectiles.values()].map((p) => ({
         ...p.toJSON(),
         ticksLived: p.ticksLived,
         maxLifetime: p.maxLifetime,
@@ -470,7 +517,10 @@ class GameEngine {
     const dy = by - ay;
     const lenSq = dx * dx + dy * dy;
     if (lenSq === 0) return Math.hypot(px - ax, py - ay);
-    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+    const t = Math.max(
+      0,
+      Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq),
+    );
     return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
   }
 }

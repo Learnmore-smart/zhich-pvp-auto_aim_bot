@@ -1,8 +1,10 @@
 const {
-  PLAYER_HP, PLAYER_AMMO,
-  PLAYER_MAX_AMMO, PLAYER_SIZE,
+  PLAYER_HP,
+  PLAYER_AMMO,
+  PLAYER_MAX_AMMO,
+  PLAYER_SIZE,
   RELOAD_COOLDOWN_TICKS,
-} = require('./constants');
+} = require("./constants");
 
 class Player {
   constructor(id, username, x, y, color = null) {
@@ -19,11 +21,11 @@ class Player {
     this.alive = true;
 
     // State flags
-    this.reloadCooldown = 0;      // remaining reload cooldown ticks
+    this.reloadCooldown = 0; // remaining reload cooldown ticks
     this.ready = false;
 
     // Action queue (processed once per tick)
-    this.pendingAction = null;
+    this.pendingActions = [];
 
     // Tracking
     this.kills = 0;
@@ -35,9 +37,18 @@ class Player {
 
   static randomColor() {
     const colors = [
-      '#e74c3c', '#3498db', '#2ecc71', '#f1c40f',
-      '#9b59b6', '#e67e22', '#1abc9c', '#e84393',
-      '#00cec9', '#fdcb6e', '#6c5ce7', '#ff7675',
+      "#e74c3c",
+      "#3498db",
+      "#2ecc71",
+      "#f1c40f",
+      "#9b59b6",
+      "#e67e22",
+      "#1abc9c",
+      "#e84393",
+      "#00cec9",
+      "#fdcb6e",
+      "#6c5ce7",
+      "#ff7675",
     ];
     return colors[Math.floor(Math.random() * colors.length)];
   }
@@ -56,7 +67,8 @@ class Player {
   }
 
   tickCooldowns() {
-    if (this.reloadCooldown > 0) this.reloadCooldown--;
+    this.reloadCooldown = 0;
+    this.ammo = this.maxAmmo;
   }
 
   reset(x, y) {
@@ -64,7 +76,7 @@ class Player {
     this.ammo = PLAYER_AMMO;
     this.alive = true;
     this.reloadCooldown = 0;
-    this.pendingAction = null;
+    this.pendingActions = [];
     this.kills = 0;
     this.damageDealt = 0;
     this.ready = false;

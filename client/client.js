@@ -101,6 +101,7 @@ const $ = (id) => document.getElementById(id);
 const setupScreen = $("setup-screen");
 const gameScreen = $("game-screen");
 const serverInput = $("server-url");
+const playerIdInput = $("player-id-input");
 const usernameInput = $("username");
 const registerBtn = $("register-btn");
 const setupError = $("setup-error");
@@ -231,40 +232,80 @@ setAimAngle(0);
 registerBtn.addEventListener("click", doRegister);
 $("disconnect-btn").addEventListener("click", doDisconnect);
 
-[serverInput, usernameInput].forEach((el) => {
+[serverInput, playerIdInput, usernameInput].forEach((el) => {
   el.addEventListener("keydown", (e) => {
     if (e.key === "Enter") doRegister();
   });
 });
 
+// Auto-load session
+window.addEventListener("DOMContentLoaded", () => {
+  const savedUrl = localStorage.getItem("arena_server_url");
+  const savedId = localStorage.getItem("arena_player_id");
+  const savedName = localStorage.getItem("arena_player_name");
+
+  if (savedUrl) serverInput.value = savedUrl;
+  if (savedId) {
+    playerIdInput.value = savedId;
+    if (savedName) usernameInput.value = savedName;
+
+    // Auto-connect if we have an ID
+    doRegister();
+  }
+});
+
 async function doRegister() {
   const url = (serverInput.value || DEFAULT_SERVER).replace(/\/$/, "");
+  const manualId = playerIdInput.value.trim();
   const name = usernameInput.value.trim();
-  if (!name) {
-    showSetupError("Enter a username");
+
+  if (!manualId && !name) {
+    showSetupError("Enter a username to register or a Player ID to connect");
     return;
   }
+
   serverUrl = url;
   registerBtn.disabled = true;
   registerBtn.querySelector(".btn-text").textContent = "Connecting\u2026";
   hideSetupError();
 
   try {
-    const res = await apiFetch("/register", "POST", { username: name });
-    const data = await res.json();
-    if (!res.ok) {
-      showSetupError(data.error || "Registration failed");
-      return;
+    if (manualId) {
+      // Manual ID connection
+      playerId = manualId;
+      playerName = name || "Player";
+      playerColor = "#00d4ff";
+
+      // Save to local storage
+      localStorage.setItem("arena_server_url", serverUrl);
+      localStorage.setItem("arena_player_id", playerId);
+      localStorage.setItem("arena_player_name", playerName);
+
+      enterGame();
+    } else {
+      // New registration
+      const res = await apiFetch("/register", "POST", { username: name });
+      const data = await res.json();
+      if (!res.ok) {
+        showSetupError(data.error || "Registration failed");
+        return;
+      }
+      playerId = data.player_id;
+      playerName = data.username;
+      playerColor = "#00d4ff";
+
+      // Save to local storage
+      localStorage.setItem("arena_server_url", serverUrl);
+      localStorage.setItem("arena_player_id", playerId);
+      localStorage.setItem("arena_player_name", playerName);
+
+      enterGame();
     }
-    playerId = data.player_id;
-    playerName = data.username;
-    playerColor = "#00d4ff"; // will be updated from state
-    enterGame();
   } catch (e) {
     showSetupError("Cannot reach server: " + (e.message || "network error"));
   } finally {
     registerBtn.disabled = false;
-    registerBtn.querySelector(".btn-text").textContent = "Deploy & Connect";
+    registerBtn.querySelector(".btn-text").textContent = "Connect / Register";
   }
 }
 
@@ -294,6 +335,10 @@ function doDisconnect() {
   }
   heldMovementKeys.clear();
   lastMovementKey = null;
+
+  // Clear session from local storage
+  localStorage.removeItem("arena_player_id");
+
   playerId = null;
   playerName = "";
   gameState = null;
@@ -879,17 +924,152 @@ function handleKeyDown(e) {
     if (autoActionEnabled) {
       if (!autoActionInterval) {
         autoActionInterval = setInterval(() => {
-          if (!autoActionEnabled || !playerId || !localState.alive) {
+          if (
+            !autoActionEnabled ||
+            !playerId ||
+            !localState.alive ||
+            !gameState
+          ) {
             clearInterval(autoActionInterval);
             autoActionInterval = null;
             return;
           }
-          if (localState.ammo > 0) {
-            sendAction("shoot", null, aimAngle);
-          } else if (!localState.reloadCd) {
-            sendAction("reload", null, null);
+
+          if (!window.botBlacklist) window.botBlacklist = {};
+          if (!window.botTargetShots) window.botTargetShots = 0;
+          if (!window.botTargetId) window.botTargetId = null;
+
+          const now = performance.now();
+          for (const id in window.botBlacklist) {
+            if (now > window.botBlacklist[id]) delete window.botBlacklist[id];
           }
-        }, 250); // Fire/Reload check every 250ms
+
+          const botHasLineOfSight = (x1, y1, x2, y2) => {
+            if (!gameState.arena || !gameState.arena.obstacles) return true;
+            const W = 0.5; // player collision padding
+            for (const obs of gameState.arena.obstacles) {
+              if (obs.type === "wall") {
+                const rx = obs.x - W,
+                  ry = obs.y - W,
+                  rw = obs.w + W * 2,
+                  rh = obs.h + W * 2;
+                const minX = Math.min(x1, x2),
+                  maxX = Math.max(x1, x2);
+                const minY = Math.min(y1, y2),
+                  maxY = Math.max(y1, y2);
+                if (maxX < rx || minX > rx + rw || maxY < ry || minY > ry + rh)
+                  continue;
+
+                const intersect = (x3, y3, x4, y4) => {
+                  const den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+                  if (den === 0) return false;
+                  const t =
+                    ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den;
+                  const u =
+                    -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den;
+                  return t > 0 && t < 1 && u > 0 && u < 1;
+                };
+                if (
+                  intersect(rx, ry, rx + rw, ry) ||
+                  intersect(rx + rw, ry, rx + rw, ry + rh) ||
+                  intersect(rx + rw, ry + rh, rx, ry + rh) ||
+                  intersect(rx, ry + rh, rx, ry)
+                ) {
+                  return false;
+                }
+              }
+            }
+            return true;
+          };
+
+          const self = gameState.self;
+          if (self && gameState.nearbyPlayers) {
+            let nearestVisible = null;
+            let nearestVisibleDist = Infinity;
+            let nearestHidden = null;
+            let nearestHiddenDist = Infinity;
+
+            gameState.nearbyPlayers.forEach((p) => {
+              if (!p.alive || window.botBlacklist[p.id]) return;
+              const dx = p.x - self.x;
+              const dy = p.y - self.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              const extendedP = { ...p, dx, dy, dist };
+
+              if (botHasLineOfSight(self.x, self.y, p.x, p.y)) {
+                if (dist < nearestVisibleDist) {
+                  nearestVisibleDist = dist;
+                  nearestVisible = extendedP;
+                }
+              } else {
+                if (dist < nearestHiddenDist) {
+                  nearestHiddenDist = dist;
+                  nearestHidden = extendedP;
+                }
+              }
+            });
+
+            // Find the absolute closest enemy to shoot at, preferring visible ones, but picking hidden if closer.
+            const target = nearestVisible || nearestHidden;
+
+            if (target) {
+              const dx = target.dx;
+              const dy = target.dy;
+              const dist = target.dist;
+
+              if (window.botTargetId !== target.id) {
+                window.botTargetId = target.id;
+                window.botTargetShots = 0;
+              }
+
+              const aimAngleDeg =
+                ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+              setAimAngle(aimAngleDeg);
+
+              // ALWAYS shoot at the target, even if behind a wall, because bullets penetrate!
+              sendAction("shoot", null, aimAngleDeg);
+
+              window.botTargetShots++;
+              if (window.botTargetShots > 15 && dist > 2) {
+                // If we shot 15 bullets and they aren't dying (e.g. they are strafing perfectly), swap target!
+                window.botBlacklist[target.id] = now + 4000;
+                window.botTargetId = null;
+              }
+
+              // S-Wave approach movement:
+              const time = performance.now();
+              const waveMagnitude = 60;
+              const waveRate = 300;
+              const weaveOffset = Math.sin(time / waveRate) * waveMagnitude;
+
+              let desiredAngle = aimAngleDeg;
+              if (dist < 4)
+                desiredAngle = (aimAngleDeg + 180 + weaveOffset) % 360; // back away
+              else desiredAngle = (aimAngleDeg + weaveOffset + 360) % 360; // weave towards
+
+              // Raycast fan to find a walkable direction! Check the desired angle first, then fan outwards.
+              let bestAngle = desiredAngle;
+              const offsets = [0, 45, -45, 90, -90, 135, -135, 180];
+              for (const off of offsets) {
+                const testAngle = (desiredAngle + off + 360) % 360;
+                const rad = (testAngle * Math.PI) / 180;
+                // Probe ahead slightly further than movement to prevent clipping
+                const probeX = self.x + Math.cos(rad) * 2;
+                const probeY = self.y + Math.sin(rad) * 2;
+
+                if (botHasLineOfSight(self.x, self.y, probeX, probeY)) {
+                  bestAngle = testAngle;
+                  break; // Found the closest clear path!
+                }
+              }
+
+              sendAction("move", null, bestAngle);
+            } else {
+              window.botTargetId = null;
+              sendAction("move", null, (performance.now() / 10) % 360);
+            }
+          }
+        }, 50); // 50ms tick rate
       }
     } else {
       if (autoActionInterval) {
@@ -1002,18 +1182,17 @@ function flashKey(keyId) {
 // ACTION SENDER
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function sendAction(action, direction, angle) {
-  if (!playerId) return;
-  angle = typeof angle === "number" ? angle : null;
+async function sendAction(action, direction = null, angle = null) {
+  if (!playerId || localState.mode === "finished") return;
+  if (!localState.alive && action !== "spawn") return;
 
-  if (!localState.alive) {
-    setLastAction("Dead — cannot act", "warn");
-    return;
+  // God Mode: No shoot blocking
+  if (action === "shoot") {
+    // Fire freely
   }
-  if (action === "shoot" && localState.ammo <= 0) {
-    setLastAction("No ammo — press R to reload", "warn");
-    return;
-  }
+
+  // angle = typeof angle === "number" ? angle : null; // This line is now redundant due to default param
+
   if (action === "reload" && localState.reloadCd) {
     scheduleRetry(action, direction, angle);
     setLastAction("Reload on cooldown — queued", "warn");
