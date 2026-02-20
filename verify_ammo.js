@@ -6,19 +6,24 @@ async function runTest() {
   try {
     // 1. Register
     console.log("Step 1: Registering...");
+    const username = "AmmoTester_" + Math.random().toString(36).slice(2, 8);
     const regRes = await fetch(`${BASE}/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "AmmoTester" }),
+      body: JSON.stringify({ username }),
     });
     const regData = await regRes.json();
+    if (!regRes.ok || !regData.player_id) {
+      console.error("Register failed:", regData);
+      process.exit(1);
+    }
     const playerId = regData.player_id;
     console.log(`Registered: ${playerId}`);
 
     // 2. Burst shoot
-    console.log("Step 2: Sending burst actions (6 shots)...");
+    console.log("Step 2: Sending burst actions (50 shots)...");
     const actionPromises = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 50; i++) {
       actionPromises.push(
         fetch(`${BASE}/action`, {
           method: "POST",
@@ -46,7 +51,7 @@ async function runTest() {
       `Reload CD right after burst: ${stateData.self.reloadCooldown}`,
     );
 
-    // 4. Wait for refill and check (should take 1 second)
+    // 4. Wait for refill and check
     console.log(
       "Step 4: Waiting 1200ms for reload then checking final ammo...",
     );
@@ -60,8 +65,8 @@ async function runTest() {
     }
     console.log(`Ammo after refill: ${stateData2.self.ammo}`);
 
-    if (stateData2.self.ammo === 5) {
-      console.log("SUCCESS: Ammo is auto-refilled to 5.");
+    if (stateData2.self.ammo === 50) {
+      console.log("SUCCESS: Ammo is auto-refilled to 50.");
     } else {
       console.error("FAIL: Ammo did not refill.");
       process.exit(1);

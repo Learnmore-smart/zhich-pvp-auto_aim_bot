@@ -494,16 +494,18 @@ function updateHUD() {
   valHp.textContent = hp;
 
   // Ammo pips
-  if (ammoPipsEl.children.length !== MAX_AMMO) {
+  const displayMax = 5;
+  const displayAmmo = Math.min(displayMax, ammo);
+  if (ammoPipsEl.children.length !== displayMax) {
     ammoPipsEl.innerHTML = "";
-    for (let i = 0; i < MAX_AMMO; i++) {
+    for (let i = 0; i < displayMax; i++) {
       const pip = document.createElement("div");
       pip.className = "pip";
       ammoPipsEl.appendChild(pip);
     }
   }
   Array.from(ammoPipsEl.children).forEach((pip, i) => {
-    pip.className = "pip" + (i < ammo ? "" : " empty");
+    pip.className = "pip" + (i < displayAmmo ? "" : " empty");
   });
   valAmmo.textContent = ammo + "/" + MAX_AMMO;
 
@@ -936,7 +938,6 @@ function handleKeyDown(e) {
           }
 
           if (!window.botBlacklist) window.botBlacklist = {};
-          if (!window.botTargetShots) window.botTargetShots = 0;
           if (!window.botTargetId) window.botTargetId = null;
 
           const now = performance.now();
@@ -944,42 +945,21 @@ function handleKeyDown(e) {
             if (now > window.botBlacklist[id]) delete window.botBlacklist[id];
           }
 
-          const botHasLineOfSight = (x1, y1, x2, y2) => {
-            if (!gameState.arena || !gameState.arena.obstacles) return true;
-            const W = 0.5; // player collision padding
-            for (const obs of gameState.arena.obstacles) {
-              if (obs.type === "wall") {
-                const rx = obs.x - W,
-                  ry = obs.y - W,
-                  rw = obs.w + W * 2,
-                  rh = obs.h + W * 2;
-                const minX = Math.min(x1, x2),
-                  maxX = Math.max(x1, x2);
-                const minY = Math.min(y1, y2),
-                  maxY = Math.max(y1, y2);
-                if (maxX < rx || minX > rx + rw || maxY < ry || minY > ry + rh)
-                  continue;
-
-                const intersect = (x3, y3, x4, y4) => {
-                  const den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-                  if (den === 0) return false;
-                  const t =
-                    ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den;
-                  const u =
-                    -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den;
-                  return t > 0 && t < 1 && u > 0 && u < 1;
-                };
-                if (
-                  intersect(rx, ry, rx + rw, ry) ||
-                  intersect(rx + rw, ry, rx + rw, ry + rh) ||
-                  intersect(rx + rw, ry + rh, rx, ry + rh) ||
-                  intersect(rx, ry + rh, rx, ry)
-                ) {
-                  return false;
-                }
+          const isBlockedAt = (x, y) => {
+            const arena = gameState.arena;
+            if (!arena) return false;
+            if (x < 0 || y < 0 || x > arena.width || y > arena.height) return true;
+            for (const obs of arena.obstacles || []) {
+              if (
+                x >= obs.x - 0.35 &&
+                x <= obs.x + obs.w + 0.35 &&
+                y >= obs.y - 0.35 &&
+                y <= obs.y + obs.h + 0.35
+              ) {
+                return true;
               }
             }
-            return true;
+            return false;
           };
 
           const self = gameState.self;
@@ -989,8 +969,6 @@ function handleKeyDown(e) {
 
             gameState.nearbyPlayers.forEach((p) => {
               if (!p.alive || window.botBlacklist[p.id]) return;
-              // Check if wall is blocking us
-              if (!botHasLineOfSight(self.x, self.y, p.x, p.y)) return;
 
               const dx = p.x - self.x;
               const dy = p.y - self.y;
@@ -1020,70 +998,64 @@ function handleKeyDown(e) {
 
               const time = performance.now();
 
-              if (localState.ammo <= 0 && !localState.reloadCd) {
-                sendAction("reload");
-              } else if (
-                localState.ammo > 0 &&
-                (!window.botWaitStateUpdate || time > window.botWaitStateUpdate)
-              ) {
-                // Shoot all bullets at once
-                const shots = Math.min(50, localState.ammo);
-                for (let i = 0; i < shots; i++) {
-                  // Slight spread to cover dodges
-                  const spread = (Math.random() - 0.5) * 8;
+              if (localState.ammo > 0 && !localState.reloadCd) {
+                const burstShots = Math.min(4, localState.ammo);
+                for (let i = 0; i < burstShots; i++) {
+                  const spread = (Math.random() - 0.5) * 6;
                   sendAction("shoot", null, (aimAngleDeg + spread + 360) % 360);
                 }
-                // Wait to prevent spamming while server syncs ammo state
-                window.botWaitStateUpdate = time + 400;
               }
 
-              // MAINTAIN DISTANCE MOVEMENT & ERRATIC JITTER:
               if (!window.botMoveState || time > window.botMoveState.until) {
-                // Pick a random strafe direction
-                let angleBase;
-                if (dist < 7) {
-                  // Close: run away in a zigzag
-                  angleBase = aimAngleDeg + 180 + (Math.random() * 120 - 60);
-                } else if (dist > 16) {
-                  // Far: approach zig zag
-                  angleBase = aimAngleDeg + (Math.random() * 90 - 45);
+                const preferredMin = 8;
+                const preferredMax = 14;
+                const actionRoll = Math.random();
+                let moveAngle;
+
+                if (dist < preferredMin) {
+                  moveAngle = aimAngleDeg + 180 + (Math.random() > 0.5 ? 35 : -35);
+                } else if (dist > preferredMax) {
+                  moveAngle = aimAngleDeg + (Math.random() > 0.5 ? 25 : -25);
+                } else if (actionRoll < 0.45) {
+                  moveAngle = aimAngleDeg + (Math.random() > 0.5 ? 90 : -90);
+                } else if (actionRoll < 0.8) {
+                  moveAngle = aimAngleDeg + (Math.random() > 0.5 ? 135 : -135);
                 } else {
-                  // Mid-range: strafe perpendicular with some variance
-                  const strafeDir = Math.random() > 0.5 ? 90 : -90;
-                  angleBase =
-                    aimAngleDeg + strafeDir + (Math.random() * 45 - 22.5);
+                  moveAngle = aimAngleDeg + (Math.random() * 360 - 180);
                 }
 
                 window.botMoveState = {
-                  angle: (angleBase + 360) % 360,
-                  until: time + 300 + Math.random() * 400, // hold direction for 300-700ms
+                  angle: ((moveAngle + (Math.random() * 40 - 20)) % 360 + 360) % 360,
+                  until: time + 80 + Math.random() * 120,
                 };
               }
-              let desiredAngle = window.botMoveState.angle;
 
-              // Raycast fan to find a walkable direction so it doesn't back into a wall!
+              const desiredAngle = window.botMoveState.angle;
               let bestAngle = desiredAngle;
-              const offsets = [0, 45, -45, 90, -90, 135, -135, 180];
+              const offsets = [0, 30, -30, 60, -60, 90, -90, 150, -150, 180];
               for (const off of offsets) {
                 const testAngle = (desiredAngle + off + 360) % 360;
                 const rad = (testAngle * Math.PI) / 180;
-                // Probe ahead slightly further than movement to prevent clipping
-                const probeX = self.x + Math.cos(rad) * 2;
-                const probeY = self.y + Math.sin(rad) * 2;
-
-                if (botHasLineOfSight(self.x, self.y, probeX, probeY)) {
+                const probeNearX = self.x + Math.cos(rad) * 1.1;
+                const probeNearY = self.y + Math.sin(rad) * 1.1;
+                const probeFarX = self.x + Math.cos(rad) * 2.1;
+                const probeFarY = self.y + Math.sin(rad) * 2.1;
+                if (!isBlockedAt(probeNearX, probeNearY) && !isBlockedAt(probeFarX, probeFarY)) {
                   bestAngle = testAngle;
-                  break; // Found the closest clear path!
+                  break;
                 }
               }
 
               sendAction("move", null, bestAngle);
             } else {
               window.botTargetId = null;
-              sendAction("move", null, (performance.now() / 10) % 360);
+              if (localState.ammo < 25 && !localState.reloadCd) {
+                sendAction("reload");
+              }
+              sendAction("move", null, (performance.now() / 6) % 360);
             }
           }
-        }, 50); // 50ms tick rate
+        }, 25); // ultra-fast bot loop
       }
     } else {
       if (autoActionInterval) {

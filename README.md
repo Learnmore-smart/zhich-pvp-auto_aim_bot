@@ -13,8 +13,8 @@ Railway runs persistent Node.js servers — required for the WebSocket game loop
 
 That's it. No extra configuration needed — `railway.toml` is already included.
 
-> **Why not Vercel?**  
-> Vercel is serverless — functions spin up per request and share no memory between calls.  
+> **Why not Vercel?**
+> Vercel is serverless — functions spin up per request and share no memory between calls.
 > This app needs a *persistent process* for the in-memory game state and the 20 TPS `setInterval` game loop. Railway, Render, and Fly.io all fit that model.
 
 ### Alternative: Render
@@ -98,14 +98,14 @@ GET /state?player_id=p_a1b2c3d4   → zoomed-in player state
 | Stat | Default |
 |------|---------|
 | HP | 100 |
-| Ammo | 5 |
+| Ammo | 50 |
 | Bullet Damage | 25 HP |
-| Bullet Speed | 2 units/tick |
-| Bullet Lifetime | 50 ticks (2.5 sec) |
-| Max bullets per player | 5 |
-| Reload cooldown | 10 ticks (0.5 sec) |
+| Bullet Speed | 18 units/tick |
+| Bullet Lifetime | 300 ticks (15 sec) |
+| Max bullets per player | 10000 |
+| Reload cooldown | 2 ticks (0.1 sec) |
 | Tick Rate | 20 TPS (50ms per tick) |
-| Rate Limit | 30 actions/sec per player |
+| Rate Limit | 200 actions/sec per player |
 
 ## Game Flow
 
