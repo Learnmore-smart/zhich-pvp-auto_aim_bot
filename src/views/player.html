@@ -243,7 +243,7 @@ async function register() {
   if (!username) return showError('Enter a username');
 
   try {
-    const res  = await fetch('/zhich-pvp/register', {
+    const res  = await fetch('/register', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ username }),
@@ -264,7 +264,7 @@ async function joinExisting() {
   if (!id) return showError('Enter a Player ID');
 
   try {
-    const res  = await fetch(`/zhich-pvp/state?player_id=${encodeURIComponent(id)}`);
+    const res  = await fetch(`/state?player_id=${encodeURIComponent(id)}`);
     const data = await res.json();
     if (data.error) return showError('Player not found');
 
@@ -296,7 +296,7 @@ function enterGame() {
 // ── WebSocket ────────────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/zhich-pvp?type=player&player_id=${encodeURIComponent(playerId)}`);
+  ws = new WebSocket(`${proto}//${location.host}?type=player&player_id=${encodeURIComponent(playerId)}`);
 
   ws.onopen  = () => addLog('Connected to server', 'ok');
   ws.onclose = () => { addLog('Disconnected — reconnecting…', 'warn'); setTimeout(connectWS, 1200); };

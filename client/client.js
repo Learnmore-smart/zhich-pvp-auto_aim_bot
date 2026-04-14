@@ -365,7 +365,7 @@ function connectWebSocket() {
       wsProto +
       "//" +
       serverOrigin.host +
-      "/zhich-pvp?type=player&player_id=" +
+      "?type=player&player_id=" +
       encodeURIComponent(playerId);
     ws = new WebSocket(wsUrl);
 
@@ -1243,8 +1243,7 @@ function apiFetch(path, method, body) {
     headers: { "Content-Type": "application/json" },
   };
   if (body) opts.body = JSON.stringify(body);
-  const subpath = "/zhich-pvp";
-  return fetch(serverUrl + subpath + path, opts);
+  return fetch(serverUrl + path, opts);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
