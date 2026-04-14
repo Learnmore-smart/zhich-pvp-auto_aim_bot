@@ -258,7 +258,8 @@ var wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 var ws;
 
 function connectWS() {
-  ws = new WebSocket(wsProtocol + '//' + location.host + '?type=bigscreen');
+  var wsPath = '/zhich-pvp';
+  ws = new WebSocket(wsProtocol + '//' + location.host + wsPath + '?type=bigscreen');
   ws.onmessage = function(e) {
     var msg = JSON.parse(e.data);
     if (msg.type === 'state') {

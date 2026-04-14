@@ -13,8 +13,10 @@ const PORT = process.env.PORT || 3000;
 const app = express();
 const server = http.createServer(app);
 
+const baseRouter = express.Router();
+
 // ── CORS — allow any origin (clients on Vercel, local dev, etc.) ──────────────
-app.use((req, res, next) => {
+baseRouter.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -22,13 +24,13 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "views")));
-app.use("/client", express.static(path.join(__dirname, "../client")));
+baseRouter.use(express.json());
+baseRouter.use(express.static(path.join(__dirname, "views")));
+baseRouter.use("/client", express.static(path.join(__dirname, "../client")));
 
 // ── Root Redirect ─────────────────────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.redirect("/bigscreen");
+baseRouter.get("/", (req, res) => {
+  res.redirect("/zhich-pvp/bigscreen");
 });
 
 // ── Game State ────────────────────────────────────────────────────────────────
@@ -195,15 +197,22 @@ const context = {
   doReset,
 };
 
-app.use("/action", rateLimiter);
-app.use("/", createApiRouter(context));
+baseRouter.use("/action", rateLimiter);
+baseRouter.use("/", createApiRouter(context));
 
 // ── Views ─────────────────────────────────────────────────────────────────────
-app.get("/bigscreen", (req, res) => {
+baseRouter.get("/bigscreen", (req, res) => {
   res.sendFile(path.join(__dirname, "views", "bigscreen.html"));
 });
-app.get("/monitor", (req, res) => {
+baseRouter.get("/monitor", (req, res) => {
   res.sendFile(path.join(__dirname, "views", "player.html"));
+});
+
+app.use("/zhich-pvp", baseRouter);
+
+// Root level redirect for convenience
+app.get("/", (req, res) => {
+  res.redirect("/zhich-pvp");
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
